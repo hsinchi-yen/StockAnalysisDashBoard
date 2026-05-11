@@ -1,0 +1,26 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# VS Code
+.vscode/
+
+# Logs and local artifacts
+*.log
+
+# Android artifacts
+android_app/.idea/
+android_app/.gradle/
+android_app/build/
+android_app/app/build/
+android_app/local.properties
+
+# Python patch helper scripts (temporary)
+apply_*patch*.py
+patch_*.py

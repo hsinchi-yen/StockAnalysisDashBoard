@@ -1,0 +1,1 @@
+{"ts": 1777092057.9746892, "dates": [], "holding_pct": [], "error": "資料暫不可用: FinMind request failed: HTTP 422 {\"detail\":[{\"type\":\"enum\",\"loc\":[\"query\",\"dataset\"],\"msg\":\"Input should be 'TaiwanStock"}

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">台股健檢</string>
+    <string name="status_starting_backend">Starting local dashboard service…</string>
+    <string name="status_backend_failed">Dashboard startup failed: %1$s</string>
+    <string name="page_load_failed">Dashboard page failed to load.</string>
+    <string name="retry">Retry</string>
+</resources>

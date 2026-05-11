@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <title>台股分析儀表板（FinMind）</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  </head>
+  <body>
+    <!-- 頂部進度條 -->
+    <div id="topProgress" class="top-progress"></div>
+
+    <main class="container">
+      <div class="page-header">
+        <h1>台股分析儀表板</h1>
+        <button id="themeToggle" class="theme-toggle-btn" aria-label="切換顯示模式" title="切換 Dark / Daylight 模式">
+          <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="5"/>
+            <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+          </svg>
+          <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+          </svg>
+        </button>
+      </div>
+
+      <!-- ── 查詢表單 ── -->
+      <section class="card query-card">
+        <form id="queryForm" class="form">
+          <label>
+            股票代號
+            <input id="stockId" name="stockId" value="2330" autocomplete="off" />
+          </label>
+          <label>
+            歷史年限
+            <select id="years" name="years">
+              <option value="1">1 年</option>
+              <option value="3" selected>3 年</option>
+              <option value="5">5 年</option>
+              <option value="8">8 年</option>
+              <option value="10">10 年</option>
+            </select>
+          </label>
+          <label>
+            FinMind API Key
+            <input id="token" name="token" type="password" autocomplete="off" placeholder="必填" />
+          </label>
+          <div id="tokenUsageContainer" style="grid-column: 1 / -1; display: none; margin-top: 4px;">
+            <div class="usage-bar-track">
+              <div id="tokenUsageBar" style="height:100%;width:0%;transition:width 0.4s ease,background-color 0.4s ease;"></div>
+              <div id="tokenUsageText"></div>
+            </div>
+          </div>
+          <div class="token-actions" style="grid-column:1/-1;">
+            <button id="tokenClear" type="button" class="btn-secondary">清除 Key</button>
+            <button id="tokenSave"  type="button" class="btn-secondary">儲存 Key</button>
+            <button id="tokenUsage" type="button" class="btn-secondary">查剩餘次數</button>
+            <button id="go" type="submit">查詢</button>
+          </div>
+        </form>
+        <p class="chart-note" style="margin-top:8px;">首次使用請輸入並儲存 FinMind API Key（保存在 localStorage）。</p>
+        <p id="status" class="status"></p>
+
+        <!-- 投資策略燈號 -->
+        <div id="signalCard" class="signal-card" style="display:none;">
+          <div class="signal-title">投資策略燈號</div>
+          <div class="signal-grid">
+            <div class="signal-item" id="sig-growth">
+              <div class="signal-dot"></div>
+              <div class="signal-label">成長力</div>
+              <div class="signal-detail"></div>
+            </div>
+            <div class="signal-item" id="sig-health">
+              <div class="signal-dot"></div>
+              <div class="signal-label">財務健康</div>
+              <div class="signal-detail"></div>
+            </div>
+            <div class="signal-item" id="sig-valuation">
+              <div class="signal-dot"></div>
+              <div class="signal-label">估值合理性</div>
+              <div class="signal-detail"></div>
+            </div>
+          </div>
+        </div>
+
+        <div id="trendSummary" class="summary-grid" style="margin-top:12px;"></div>
+      </section>
+
+      <!-- ── Tab 導航列 ── -->
+      <nav class="tab-nav" id="tabNav">
+        <button class="tab-btn active" data-tab="tab-basic">基本資訊</button>
+        <button class="tab-btn" data-tab="tab-revenue">營收分析</button>
+        <button class="tab-btn" data-tab="tab-profit">獲利能力</button>
+        <button class="tab-btn" data-tab="tab-health">財務健康</button>
+        <button class="tab-btn" data-tab="tab-valuation">估值</button>
+        <button class="tab-btn" data-tab="tab-buyscore">買入評分</button>
+      </nav>
+
+      <!-- ══════════════════════════════════════
+           Tab 1: 基本資訊
+      ══════════════════════════════════════ -->
+      <div id="tab-basic" class="tab-panel active">
+
+        <section class="financial-feed" id="financialFeed" aria-label="Vertical Financial Feed">
+          <article class="card feed-screen" id="feed-today">
+            <div class="feed-head">
+              <h2>今日財務狀態</h2>
+              <p class="feed-sub">即時觀察今日股價與資產變動節奏</p>
+            </div>
+            <div class="feed-metrics">
+              <div class="feed-metric-box">
+                <div class="feed-metric-label">今日價值</div>
+                <div id="feedTodayValue" class="feed-metric-value">-</div>
+              </div>
+              <div class="feed-metric-box">
+                <div class="feed-metric-label">即時變動</div>
+                <div id="feedTodayDelta" class="feed-metric-value">-</div>
+              </div>
+            </div>
+            <div id="feedTodayChart" class="chart feed-chart skeleton-section"></div>
+          </article>
+
+          <article class="card feed-screen" id="feed-week">
+            <div class="feed-head">
+              <h2>本週財務狀態</h2>
+              <p class="feed-sub">以近五日交易熱度作為本週節奏觀察</p>
+            </div>
+            <div class="feed-metrics">
+              <div class="feed-metric-box">
+                <div class="feed-metric-label">本週成交量</div>
+                <div id="feedWeekValue" class="feed-metric-value">-</div>
+              </div>
+              <div class="feed-metric-box">
+                <div class="feed-metric-label">與前段比較</div>
+                <div id="feedWeekDelta" class="feed-metric-value">-</div>
+              </div>
+            </div>
+            <div id="feedWeekChart" class="chart feed-chart skeleton-section"></div>
+          </article>
+
+          <article class="card feed-screen" id="feed-month">
+            <div class="feed-head">
+              <h2>本月財務狀態</h2>
+              <p class="feed-sub">聚焦月營收偏離均線的結構變化</p>
+            </div>
+            <div class="feed-metrics">
+              <div class="feed-metric-box">
+                <div class="feed-metric-label">最新月營收</div>
+                <div id="feedMonthValue" class="feed-metric-value">-</div>
+              </div>
+              <div class="feed-metric-box">
+                <div class="feed-metric-label">月度變化</div>
+                <div id="feedMonthDelta" class="feed-metric-value">-</div>
+              </div>
+            </div>
+            <div id="feedMonthChart" class="chart feed-chart skeleton-section"></div>
+          </article>
+        </section>
+
+        <section class="grid">
+          <section class="card">
+            <h2 id="latestPriceTitle">最新股價</h2>
+            <div id="latestPrice" class="metrics skeleton-section" style="min-height:80px;"></div>
+          </section>
+          <section class="card">
+            <h2>法人買賣</h2>
+            <div id="institutional" class="skeleton-section" style="min-height:80px;"></div>
+          </section>
+        </section>
+
+        <!-- 外資持股比例 -->
+        <section class="card">
+          <h2>外資持股比例趨勢</h2>
+          <p class="chart-note">外資持股佔流通股比例 (%)，反映外資籌碼動向。</p>
+          <div id="foreignHoldingChart" class="chart skeleton-section"></div>
+        </section>
+
+        <!-- 董監事持股 -->
+        <section class="card">
+          <h2>董監事持股資訊</h2>
+          <p class="chart-note">資料來源：Goodinfo.tw（月度歷史趨勢）。</p>
+          <div id="shareholdingTable" class="skeleton-section" style="min-height:80px;"></div>
+        </section>
+
+        <section class="card">
+          <h2>近 3 個月成交量 / 成交筆數</h2>
+          <div id="volumeTurnoverChart" class="chart skeleton-section"></div>
+        </section>
+      </div>
+
+      <!-- ══════════════════════════════════════
+           Tab 2: 營收分析
+      ══════════════════════════════════════ -->
+      <div id="tab-revenue" class="tab-panel">
+
+        <section class="card">
+          <h2>月營收 + MA(3/6/12)</h2>
+          <div id="revenueChart" class="chart skeleton-section"></div>
+          <details>
+            <summary>資料表</summary>
+            <div id="revenueTable"></div>
+          </details>
+        </section>
+
+        <!-- 月營收 YoY 成長率 -->
+        <section class="card">
+          <h2>月營收 YoY 成長率 (%)</h2>
+          <p class="chart-note">與去年同月相比的成長率。綠色代表正成長，紅色代表衰退。</p>
+          <div id="revenueYoyChart" class="chart skeleton-section"></div>
+        </section>
+
+        <section class="card">
+          <h2>股價 vs 營收</h2>
+          <p class="chart-note">左軸：月營收；右軸：月收盤價。</p>
+          <div id="priceChart" class="chart skeleton-section"></div>
+        </section>
+
+        <section class="card">
+          <h2>時間趨勢對照圖（基準 100）</h2>
+          <p class="chart-note">月營收、MA12、月收盤價與殖利率標準化至同一基準，方便比較各指標趨勢。</p>
+          <div id="trendNarrative" class="trend-narrative"></div>
+          <div id="trendOverviewChart" class="chart skeleton-section"></div>
+        </section>
+
+        <!-- EPS 季度趨勢 -->
+        <section class="card">
+          <h2>EPS 季度趨勢 + YoY 成長率</h2>
+          <p class="chart-note">左軸：單季 EPS（元）；右軸：YoY 成長率（%，同季比）。</p>
+          <div id="epsTrendChart" class="chart skeleton-section"></div>
+          <details>
+            <summary>資料表</summary>
+            <div id="epsTrendTable"></div>
+          </details>
+        </section>
+      </div>
+
+      <!-- ══════════════════════════════════════
+           Tab 3: 獲利能力
+      ══════════════════════════════════════ -->
+      <div id="tab-profit" class="tab-panel">
+
+        <!-- 利潤率三兄弟 -->
+        <section class="card">
+          <h2>利潤率趨勢（毛利率 / 營業利益率 / 淨利率）</h2>
+          <p class="chart-note">毛利率反映競爭優勢護城河；營業利益率反映管理效率；淨利率代表最終盈利能力。</p>
+          <div id="marginsChart" class="chart skeleton-section"></div>
+          <details>
+            <summary>資料表</summary>
+            <div id="marginsTable"></div>
+          </details>
+        </section>
+
+        <section class="card">
+          <h2>ROE / ROA（季度）</h2>
+          <div class="formula-block">
+            <div class="formula-item">
+              <span class="formula-label roe-label">ROE 股東權益報酬率</span>
+              <span class="formula-eq">＝ 稅後淨利 ÷ 平均股東權益</span>
+            </div>
+            <div class="formula-item">
+              <span class="formula-label roa-label">ROA 資產報酬率</span>
+              <span class="formula-eq">＝ 稅後淨利 ÷ 平均總資產</span>
+            </div>
+          </div>
+          <div id="roeRoaChart" class="chart skeleton-section"></div>
+          <details>
+            <summary>資料表</summary>
+            <div id="roeRoaTable"></div>
+          </details>
+        </section>
+      </div>
+
+      <!-- ══════════════════════════════════════
+           Tab 4: 財務健康
+      ══════════════════════════════════════ -->
+      <div id="tab-health" class="tab-panel">
+
+        <!-- 流動比率 / 速動比率 -->
+        <section class="card">
+          <h2>流動比率 / 速動比率（季度）</h2>
+          <p class="chart-note">流動比率 = 流動資產 / 流動負債（安全線 &gt; 2）；速動比率 = (流動資產 - 存貨) / 流動負債（安全線 &gt; 1）。</p>
+          <div id="liquidityChart" class="chart skeleton-section"></div>
+          <details>
+            <summary>資料表</summary>
+            <div id="liquidityTable"></div>
+          </details>
+        </section>
+
+        <!-- BVPS 趨勢 -->
+        <section class="card">
+          <h2>每股淨值（BVPS）趨勢</h2>
+          <p class="chart-note">BVPS = 股東權益 / 流通股數。持續成長代表公司帳面價值不斷提升。</p>
+          <div id="bvpsChart" class="chart skeleton-section"></div>
+        </section>
+
+        <section class="card">
+          <h2>歷年負債比（季度）</h2>
+          <p class="chart-note">負債比 = 負債總計 ÷ 資產總計 × 100%。40% 以下財務穩健；60% 以上需留意償債風險。</p>
+          <div id="debtRatioChart" class="chart skeleton-section"></div>
+          <details>
+            <summary>資料表</summary>
+            <div id="debtRatioTable"></div>
+          </details>
+        </section>
+
+        <section class="card">
+          <h2>自由現金流量（歷年）</h2>
+          <p class="chart-note">自由現金流量 = 營業活動現金流量 − 資本支出（取年度 Q4）。</p>
+          <div id="fcfChart" class="chart skeleton-section"></div>
+          <details>
+            <summary>資料表</summary>
+            <div id="fcfTable"></div>
+          </details>
+        </section>
+
+        <section class="card">
+          <h2>營運週轉天數（季度）</h2>
+          <p class="chart-note">DSO＝應收天數、DIO＝存貨天數、DPO＝應付天數、CCC＝現金轉換循環。天數越短代表效率越高。</p>
+          <div id="turnoverDaysChart" class="chart skeleton-section"></div>
+          <details>
+            <summary>資料表</summary>
+            <div id="turnoverDaysTable"></div>
+          </details>
+        </section>
+      </div>
+
+      <!-- ══════════════════════════════════════
+           Tab 5: 估值
+      ══════════════════════════════════════ -->
+      <div id="tab-valuation" class="tab-panel">
+
+        <!-- Graham Number + PEG 面板 -->
+        <section class="card">
+          <h2>多維估值比較</h2>
+          <p class="chart-note">Graham Number = √(22.5 × 平均 EPS × 最新 BVPS)；PEG = 本益比 / EPS 3 年 CAGR。</p>
+          <div id="valuationExtraPanel" class="skeleton-section" style="min-height:100px;"></div>
+        </section>
+
+        <!-- DCF -->
+        <section class="card" id="dcfSection">
+          <h2>DCF 現值估價（Gordon Growth Model）</h2>
+          <p class="chart-note">公允價值 ＝ EPS × 配息率 × (1+g) ÷ (r−g)；以近 N 年平均 EPS 與配息率計算。</p>
+          <div class="dcf-params">
+            <label class="dcf-param-label">
+              成長率 g
+              <div class="dcf-input-row"><input id="dcfG" type="number" value="4" min="0" max="20" step="0.5" /><span>%</span></div>
+            </label>
+            <label class="dcf-param-label">
+              折現率 r
+              <div class="dcf-input-row"><input id="dcfR" type="number" value="8" min="1" max="30" step="0.5" /><span>%</span></div>
+            </label>
+            <label class="dcf-param-label">
+              安全邊際
+              <div class="dcf-input-row"><input id="dcfMos" type="number" value="30" min="0" max="80" step="5" /><span>%</span></div>
+            </label>
+            <button id="dcfRecalc" class="btn-secondary">重新試算</button>
+          </div>
+          <div id="dcfResult" class="skeleton-section"></div>
+        </section>
+
+        <section class="card">
+          <h2>本益比河流圖（P/E River）</h2>
+          <p class="chart-note">歷史 PER 的百分位數帶（p5/p25/p50/p75/p95），藍線為每日實際本益比。</p>
+          <div id="peRiverChart" class="chart skeleton-section"></div>
+          <div id="peRiverBands" class="metrics" style="margin-top:8px;"></div>
+        </section>
+
+        <section class="card">
+          <h2>歷年配息（殖利率以當年 1 月股價換算）</h2>
+          <div id="dividendTable" class="skeleton-section" style="min-height:60px;"></div>
+        </section>
+      </div>
+
+      <!-- ══════════════════════════════════════
+           Tab 6: 買入評分
+      ══════════════════════════════════════ -->
+      <div id="tab-buyscore" class="tab-panel">
+
+        <!-- 總分 & 訊號卡 -->
+        <section class="card buy-score-header" id="buyScoreHeader" style="display:none">
+          <div class="buy-score-top">
+            <div>
+              <div class="buy-score-label">買入評分</div>
+              <div class="buy-score-total-row">
+                <span id="buyScoreTotal" class="buy-score-number">—</span>
+                <span id="buyScoreDenom" class="buy-score-denom">/24</span>
+              </div>
+            </div>
+            <span id="buyScoreSignalBadge" class="buy-signal-badge">—</span>
+          </div>
+          <div id="buyScoreWarnings" class="buy-score-warnings"></div>
+        </section>
+
+        <!-- 載入中骨架 -->
+        <div id="buyScoreSkeleton" class="skeleton-section" style="min-height:140px;"></div>
+
+        <!-- 排雷指標 (Risk Avoidance) -->
+        <section class="card" id="buyScoreRisk" style="display:none; border-color:#ef4444;">
+          <h2 style="color:#ef4444; display:flex; align-items:center; gap:6px;">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            排雷警示區 <span id="riskScoreLabel" style="font-size:13px;font-weight:400;color:var(--text-faint)"></span>
+          </h2>
+          <p class="chart-note" style="color:var(--text-muted); font-size:12px;">觸發 2 項(含)以上警示，系統將強制下調買入評等為「高風險避開」。</p>
+          <div id="criteriaRisk" class="criteria-list"></div>
+        </section>
+
+        <!-- 基本面條件 (weight=2, C1–C3) -->
+        <section class="card" id="buyScoreStage1" style="display:none">
+          <h2>基本面條件 <small style="font-weight:400;font-size:12px;color:var(--text-faint)">各 2 分，合計最高 6 分</small></h2>
+          <div id="criteriaStage1" class="criteria-list"></div>
+        </section>
+
+        <!-- 動能/籌碼/估值條件 (weight=1, C4–C10) -->
+        <section class="card" id="buyScoreStage2" style="display:none">
+          <h2>評分指標（24 項） <span id="stage2ScoreLabel" style="font-size:13px;font-weight:400;color:var(--text-faint)">0/24</span></h2>
+          <div id="criteriaStage2" class="criteria-list"></div>
+        </section>
+
+      </div>
+
+      <!-- 行動版底部 Tab 列 -->
+      <nav class="bottom-nav" id="bottomNav">
+        <button class="bottom-nav-btn active" data-tab="tab-basic">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>
+          <span>基本</span>
+        </button>
+        <button class="bottom-nav-btn" data-tab="tab-revenue">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+          <span>營收</span>
+        </button>
+        <button class="bottom-nav-btn" data-tab="tab-profit">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg>
+          <span>獲利</span>
+        </button>
+        <button class="bottom-nav-btn" data-tab="tab-health">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+          <span>健康</span>
+        </button>
+        <button class="bottom-nav-btn" data-tab="tab-valuation">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
+          <span>估值</span>
+        </button>
+        <button class="bottom-nav-btn" data-tab="tab-buyscore">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>
+          <span>評分</span>
+        </button>
+      </nav>
+
+      <div class="quick-actions" id="quickActions" aria-label="快速操作">
+        <button id="quickTabBack" class="quick-action-btn" type="button" title="返回上一分頁" disabled>
+          <span class="quick-action-label">返回</span>
+        </button>
+      </div>
+
+      <footer class="footer" style="padding-bottom:calc(90px + var(--android-safe-bottom, env(safe-area-inset-bottom, 0px)));">
+        <small>資料來源：FinMind API &nbsp;|&nbsp; 本工具僅供參考，不構成投資建議</small>
+      </footer>
+    </main>
+
+    <script src="/static/app.js?v=23"></script>
+  </body>
+</html>
