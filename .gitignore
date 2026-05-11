@@ -13,6 +13,7 @@ htmlcov/
 
 # Logs and local artifacts
 *.log
+.cache/
 
 # Android artifacts
 android_app/.idea/
