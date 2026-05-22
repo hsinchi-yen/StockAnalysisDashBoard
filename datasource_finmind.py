@@ -218,6 +218,35 @@ class FinMindClient:
             return None
         return str(name).strip() or None
 
+    def fetch_stock_industry(self, stock_id: str, timeout: float = 20.0) -> Optional[str]:
+        """Fetch a stock's industry category from FinMind TaiwanStockInfo.
+
+        Returns the industry_category string (e.g. '半導體業', '金融保險業') or None.
+        """
+        params = {"dataset": "TaiwanStockInfo", "data_id": stock_id}
+        if self.api_key:
+            params["token"] = self.api_key
+        try:
+            r = self.session.get(FINMIND_API, params=params, timeout=timeout)
+        except Exception:
+            return None
+        if r.status_code >= 400:
+            return None
+        try:
+            payload = r.json()
+        except Exception:
+            return None
+        if payload.get("status") != 200:
+            return None
+        data = payload.get("data") or []
+        if not data:
+            return None
+        first = data[0]
+        industry = first.get("industry_category") or first.get("industry")
+        if not industry:
+            return None
+        return str(industry).strip() or None
+
     def fetch_stock_per(self, stock_id: str, start_date: date, end_date: date, timeout: float = 30.0) -> pd.DataFrame:
         """Fetch daily PER/PBR/dividend_yield (FinMind dataset: TaiwanStockPER)."""
 
@@ -331,16 +360,25 @@ class FinMindClient:
         Level 15: > 1,000,000 shares (大戶)
         Level 1~9: < 50,000 shares (散戶, generally 1-9 covers <50k or <100k depending on bracket)
         """
-        data = self._get_dataset(
-            dataset="TaiwanStockHoldingSharesPer",
-            stock_id=stock_id,
-            start_date=start_date,
-            end_date=end_date,
-            timeout=timeout,
-        )
+        try:
+            data = self._get_dataset(
+                dataset="TaiwanStockHoldingSharesPer",
+                stock_id=stock_id,
+                start_date=start_date,
+                end_date=end_date,
+                timeout=timeout,
+            )
+        except FinMindError as exc:
+            # This dataset is gated by sponsor level on some FinMind plans.
+            # Treat as unavailable data instead of hard-failing buy score flow.
+            msg = str(exc).lower()
+            if "level is register" in msg or "sponsor" in msg:
+                return pd.DataFrame(columns=["date", "HoldingSharesLevel", "percent"])
+            raise
+
         df = pd.DataFrame(data)
         if df.empty:
-            return pd.DataFrame()
+            return pd.DataFrame(columns=["date", "HoldingSharesLevel", "percent"])
             
         df["date"] = pd.to_datetime(df["date"])
         df["percent"] = pd.to_numeric(df["percent"], errors="coerce")

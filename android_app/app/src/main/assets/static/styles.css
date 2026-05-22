@@ -57,7 +57,7 @@ body {
   background: var(--bg);
   color: var(--text-primary);
   line-height: 1.45;
-  touch-action: pan-y;
+  touch-action: auto;
 }
 
 /* ── Top Progress Bar ── */
@@ -144,59 +144,6 @@ h2 { margin: 0 0 12px; font-size: 18px; }
   margin-bottom: 16px;
 }
 
-.financial-feed {
-  display: grid;
-  gap: 14px;
-  margin-bottom: 14px;
-}
-
-.feed-screen {
-  margin-bottom: 0;
-  border-radius: 14px;
-}
-
-.feed-head {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-bottom: 10px;
-}
-
-.feed-sub {
-  margin: 0;
-  font-size: 12px;
-  color: var(--text-faint);
-}
-
-.feed-metrics {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  margin-bottom: 10px;
-}
-
-.feed-metric-box {
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--bg-subtle);
-  padding: 10px;
-}
-
-.feed-metric-label {
-  font-size: 11px;
-  color: var(--text-faint);
-}
-
-.feed-metric-value {
-  margin-top: 4px;
-  font-size: clamp(20px, 4.7vw, 30px);
-  font-weight: 700;
-  letter-spacing: -0.02em;
-}
-
-.feed-chart {
-  height: clamp(220px, 32vh, 360px);
-}
 .query-card { position: relative; }
 
 .grid {
@@ -376,7 +323,7 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 
 /* ── Chart ── */
 .chart { width: 100%; height: clamp(320px, 48vh, 520px); }
-.chart, .tab-panel { touch-action: pan-y; }
+.chart, .tab-panel { touch-action: auto; }
 
 /* ── Tab Navigation (Desktop) ── */
 .tab-nav {
@@ -526,36 +473,6 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 .dcf-status-neutral { background: #e0e7ff; color: #1e3a8a; }
 .dcf-na { color: var(--text-faint); font-size: 13px; padding: 8px 0; }
 
-/* ── Quick Actions (mobile-first utility buttons) ── */
-.quick-actions {
-  position: fixed;
-  right: 14px;
-  bottom: calc(108px + var(--android-safe-bottom, env(safe-area-inset-bottom, 0px)));
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  z-index: 250;
-}
-.quick-action-btn {
-  min-width: 58px;
-  min-height: 38px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--bg-card);
-  color: var(--text-primary);
-  backdrop-filter: blur(4px);
-  font-size: 12px;
-  font-weight: 700;
-  padding: 6px 10px;
-}
-.quick-action-btn:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-.quick-action-label {
-  pointer-events: none;
-}
-
 /* ── Valuation Extra Panel ── */
 .valuation-grid {
   display: grid;
@@ -635,11 +552,11 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 /* ════════════════════════════════════
    Responsive — Mobile (≤ 768px)
 ════════════════════════════════════ */
-@media (max-width: 768px) {
+@media (max-width: 900px) {
   .container {
     padding: 16px;
-    padding-top: calc(16px + var(--android-safe-top, env(safe-area-inset-top, 0px)));
-    padding-bottom: calc(112px + var(--android-safe-bottom, env(safe-area-inset-bottom, 0px)));
+    padding-top: calc(56px + var(--android-safe-top, env(safe-area-inset-top, 0px)));
+    padding-bottom: calc(32px + var(--android-safe-bottom, env(safe-area-inset-bottom, 0px)));
   }
   h1 { font-size: 20px; }
   h2 { font-size: 16px; }
@@ -649,34 +566,33 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
   .summary-value { font-size: 18px; }
   .chart { height: clamp(260px, 42vh, 400px); }
 
-  /* Mobile uses bottom tab navigation */
-  .bottom-nav {
-    display: flex !important;
-    align-items: center;
-    padding-bottom: max(8px, var(--android-safe-bottom, env(safe-area-inset-bottom, 0px)));
-  }
+  /* Tab nav fixed at top, bottom-nav hidden */
+  .bottom-nav { display: none !important; }
   .tab-nav {
-    display: none !important;
-  }
-  .quick-actions {
-    right: 10px;
-    bottom: calc(82px + var(--android-safe-bottom, env(safe-area-inset-bottom, 0px)));
-  }
-
-  .financial-feed {
-    max-height: calc(100vh - 270px - var(--android-safe-top, env(safe-area-inset-top, 0px)));
-    overflow-y: auto;
-    scroll-snap-type: y mandatory;
+    display: flex !important;
+    position: fixed;
+    top: var(--android-safe-top, env(safe-area-inset-top, 0px));
+    left: 0; right: 0;
+    z-index: 200;
+    margin: 0;
+    border-radius: 0;
+    border-top: none;
+    border-bottom: 1px solid var(--border);
+    border-left: none;
+    border-right: none;
+    padding: 4px 6px;
+    gap: 2px;
+    background: var(--bg-card);
+    overflow-x: auto;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
     -webkit-overflow-scrolling: touch;
-    padding-right: 2px;
   }
-
-  .feed-screen {
-    scroll-snap-align: start;
-    min-height: calc(100vh - 310px - var(--android-safe-top, env(safe-area-inset-top, 0px)));
-    display: flex;
-    flex-direction: column;
-    justify-content: flex-start;
+  .tab-nav::-webkit-scrollbar { display: none; }
+  .tab-btn {
+    padding: 6px 12px;
+    font-size: 12px;
+    white-space: nowrap;
   }
 
   /* Tab panel gets full width */
@@ -698,8 +614,8 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
   .signal-dot { width: 24px; height: 24px; }
 }
 
-@media (max-width: 480px) and (min-height: 800px) {
-  /* QHD portrait: taller charts for high-DPI small-screen phones */
+@media (max-width: 900px) and (min-height: 800px) {
+  /* QHD/FHD portrait: taller charts */
   .chart { height: clamp(320px, 48vh, 500px); }
 }
 
@@ -714,28 +630,6 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 ════════════════════════════════════ */
 @media (min-width: 769px) and (max-width: 1080px) {
   .tab-btn { padding: 8px 12px; font-size: 13px; }
-  .quick-actions {
-    right: 18px;
-    bottom: 18px;
-  }
-
-  .onehand-dock {
-    position: static;
-    margin: 10px 0 0;
-  }
-}
-
-@media (min-width: 769px) {
-  .quick-actions {
-    right: 20px;
-    bottom: 20px;
-  }
-
-  .onehand-dock {
-    position: static;
-    margin-top: 10px;
-    backdrop-filter: none;
-  }
 }
 
 @media (min-width: 1080px) and (min-height: 900px) {
@@ -806,3 +700,33 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 .criterion-value.pass   { color: #10b981; }
 .criterion-value.fail   { color: #ef4444; }
 .criterion-value.unknown { color: var(--text-faint); }
+
+/* ── Risk Badge Summary (tab-basic) ── */
+.risk-badge-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  background: #fef2f2;
+  border: 1px solid #fca5a5;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #b91c1c;
+}
+[data-theme="dark"] .risk-badge-summary {
+  background: #450a0a;
+  border-color: #7f1d1d;
+  color: #fca5a5;
+}
+.risk-badge-link {
+  background: none;
+  border: none;
+  color: #b91c1c;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: underline;
+  padding: 0;
+}
+[data-theme="dark"] .risk-badge-link { color: #fca5a5; }

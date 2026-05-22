@@ -2,7 +2,7 @@
 <html lang="zh-Hant">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>台股分析儀表板（FinMind）</title>
     <link rel="stylesheet" href="/static/styles.css" />
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
@@ -102,61 +102,12 @@
       ══════════════════════════════════════ -->
       <div id="tab-basic" class="tab-panel active">
 
-        <section class="financial-feed" id="financialFeed" aria-label="Vertical Financial Feed">
-          <article class="card feed-screen" id="feed-today">
-            <div class="feed-head">
-              <h2>今日財務狀態</h2>
-              <p class="feed-sub">即時觀察今日股價與資產變動節奏</p>
-            </div>
-            <div class="feed-metrics">
-              <div class="feed-metric-box">
-                <div class="feed-metric-label">今日價值</div>
-                <div id="feedTodayValue" class="feed-metric-value">-</div>
-              </div>
-              <div class="feed-metric-box">
-                <div class="feed-metric-label">即時變動</div>
-                <div id="feedTodayDelta" class="feed-metric-value">-</div>
-              </div>
-            </div>
-            <div id="feedTodayChart" class="chart feed-chart skeleton-section"></div>
-          </article>
-
-          <article class="card feed-screen" id="feed-week">
-            <div class="feed-head">
-              <h2>本週財務狀態</h2>
-              <p class="feed-sub">以近五日交易熱度作為本週節奏觀察</p>
-            </div>
-            <div class="feed-metrics">
-              <div class="feed-metric-box">
-                <div class="feed-metric-label">本週成交量</div>
-                <div id="feedWeekValue" class="feed-metric-value">-</div>
-              </div>
-              <div class="feed-metric-box">
-                <div class="feed-metric-label">與前段比較</div>
-                <div id="feedWeekDelta" class="feed-metric-value">-</div>
-              </div>
-            </div>
-            <div id="feedWeekChart" class="chart feed-chart skeleton-section"></div>
-          </article>
-
-          <article class="card feed-screen" id="feed-month">
-            <div class="feed-head">
-              <h2>本月財務狀態</h2>
-              <p class="feed-sub">聚焦月營收偏離均線的結構變化</p>
-            </div>
-            <div class="feed-metrics">
-              <div class="feed-metric-box">
-                <div class="feed-metric-label">最新月營收</div>
-                <div id="feedMonthValue" class="feed-metric-value">-</div>
-              </div>
-              <div class="feed-metric-box">
-                <div class="feed-metric-label">月度變化</div>
-                <div id="feedMonthDelta" class="feed-metric-value">-</div>
-              </div>
-            </div>
-            <div id="feedMonthChart" class="chart feed-chart skeleton-section"></div>
-          </article>
-        </section>
+        <!-- 排雷警示橫幅（buy_score 資料載入後更新） -->
+        <div id="riskBadgeSummary" class="risk-badge-summary" style="display:none;">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          偵測到 <strong id="riskBadgeCount">0</strong> 項排雷警示 —
+          <button type="button" class="risk-badge-link" id="riskBadgeLink">查看詳情</button>
+        </div>
 
         <section class="grid">
           <section class="card">
@@ -381,7 +332,7 @@
         <section class="card buy-score-header" id="buyScoreHeader" style="display:none">
           <div class="buy-score-top">
             <div>
-              <div class="buy-score-label">買入評分</div>
+              <div class="buy-score-label">買入評分 <span id="buyScoreIndustryBadge" style="display:none;font-size:11px;font-weight:500;background:var(--bg-faint);border:1px solid var(--border);border-radius:4px;padding:1px 6px;margin-left:6px;color:var(--text-muted);vertical-align:middle;"></span></div>
               <div class="buy-score-total-row">
                 <span id="buyScoreTotal" class="buy-score-number">—</span>
                 <span id="buyScoreDenom" class="buy-score-denom">/24</span>
@@ -447,17 +398,11 @@
         </button>
       </nav>
 
-      <div class="quick-actions" id="quickActions" aria-label="快速操作">
-        <button id="quickTabBack" class="quick-action-btn" type="button" title="返回上一分頁" disabled>
-          <span class="quick-action-label">返回</span>
-        </button>
-      </div>
-
       <footer class="footer" style="padding-bottom:calc(90px + var(--android-safe-bottom, env(safe-area-inset-bottom, 0px)));">
         <small>資料來源：FinMind API &nbsp;|&nbsp; 本工具僅供參考，不構成投資建議</small>
       </footer>
     </main>
 
-    <script src="/static/app.js?v=23"></script>
+    <script src="/static/app.js?v=24"></script>
   </body>
 </html>

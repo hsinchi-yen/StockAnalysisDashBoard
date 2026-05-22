@@ -8,3 +8,16 @@ __pycache__/
 .git/
 .gitignore
 .vscode/
+android_app/
+embedded_deployment/
+tests/
+enhancement_plan.md
+DCF_GUIDE.md
+apply_*.py
+patch_*.py
+run_patch.py
+android_launcher.py
+requirements-android.txt
+docker-compose.yml
+*.tar.gz
+

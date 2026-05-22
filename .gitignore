@@ -25,3 +25,7 @@ android_app/local.properties
 # Python patch helper scripts (temporary)
 apply_*patch*.py
 patch_*.py
+
+# Docker image tarballs (large binaries, not for VCS)
+*.tar
+*.tar.gz

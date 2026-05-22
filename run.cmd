@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal EnableDelayedExpansion
 
 cd /d "%~dp0"
 
@@ -25,8 +25,11 @@ if errorlevel 1 (
 )
 
 if /I "%MODE%"=="api" (
-  echo [INFO] Starting FastAPI at http://localhost:8000
-  "%PY%" -m uvicorn api:app --host 0.0.0.0 --port 8000
+  set "HOST=localhost"
+  set "PORT=9000"
+
+  echo [INFO] Starting FastAPI at http://!HOST!:!PORT!
+  "%PY%" -m uvicorn api:app --host !HOST! --port !PORT!
   goto :eof
 )
 

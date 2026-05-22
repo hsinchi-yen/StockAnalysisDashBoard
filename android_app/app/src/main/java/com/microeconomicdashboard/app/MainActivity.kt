@@ -38,7 +38,7 @@ class MainActivity : AppCompatActivity() {
 
         webView.settings.javaScriptEnabled = true
         webView.settings.domStorageEnabled = true
-        webView.settings.builtInZoomControls = false   // disable pinch-zoom
+        webView.settings.builtInZoomControls = true    // enable pinch-to-zoom whole page
         webView.settings.displayZoomControls = false
         webView.settings.useWideViewPort = true
         webView.settings.loadWithOverviewMode = false  // don't auto-scale to fit

@@ -1661,7 +1661,7 @@ def valuation_extra(
     start_ext = start - pd.DateOffset(years=4)  # need 4 years for CAGR
     start_ext_date = date(int(start_ext.year), int(start_ext.month), 1)
 
-    cache_key = build_cache_key("api_valuation_extra_v1", stock_id=sid, years=str(years), asof=today.isoformat())
+    cache_key = build_cache_key("api_valuation_extra_v2", stock_id=sid, years=str(years), asof=today.isoformat())
     cached = cache.get(cache_key)
     if cached and "graham_number" in cached:
         return {"stock_id": sid, **{k: v for k, v in cached.items() if k not in ("ts",)}}
@@ -1686,11 +1686,11 @@ def valuation_extra(
                 full_years = yearly[yearly["cnt"] >= 4].sort_values("year")
                 if len(full_years) >= 1:
                     avg_eps = float(full_years.tail(5)["annual_eps"].mean())
-                if len(full_years) >= 3:
-                    oldest = float(full_years.iloc[-3]["annual_eps"])
+                if len(full_years) >= 4:
+                    oldest = float(full_years.iloc[-4]["annual_eps"])
                     newest = float(full_years.iloc[-1]["annual_eps"])
                     if oldest > 0 and newest > 0:
-                        eps_cagr = round((pow(newest / oldest, 1 / 2) - 1) * 100, 2)
+                        eps_cagr = round((pow(newest / oldest, 1 / 3) - 1) * 100, 2)
 
         # --- BVPS from latest quarter ---
         latest_bvps: float | None = None
@@ -1750,6 +1750,31 @@ def valuation_extra(
 
 
 # ---------------------------------------------------------------------------
+# === Industry-aware exclusions for buy_score criteria ===
+# ---------------------------------------------------------------------------
+
+# Maps industry keyword → list of criterion IDs that are not applicable
+INDUSTRY_EXCLUSIONS: dict[str, list[str]] = {
+    "金融保險": ["debt_ratio", "debt_ratio_strict", "equity_ratio"],
+    "金融": ["debt_ratio", "debt_ratio_strict", "equity_ratio"],
+    "銀行": ["debt_ratio", "debt_ratio_strict", "equity_ratio"],
+    "保險": ["debt_ratio", "debt_ratio_strict", "equity_ratio"],
+    "租賃": ["debt_ratio", "debt_ratio_strict", "equity_ratio"],
+    "營建": ["dio"],
+}
+
+
+def _get_industry_exclusions(industry: str | None) -> set[str]:
+    if not industry:
+        return set()
+    excluded: set[str] = set()
+    for kw, cids in INDUSTRY_EXCLUSIONS.items():
+        if kw in industry:
+            excluded.update(cids)
+    return excluded
+
+
+# ---------------------------------------------------------------------------
 # === Buy Score (買入評分) — v2: 加權總分制 + 放鬆門檻 ===
 # ---------------------------------------------------------------------------
 
@@ -1762,17 +1787,21 @@ def _criterion(
     value_label: str,
     threshold: str,
     warning: str | None = None,
+    not_applicable: bool = False,
 ) -> dict[str, Any]:
-    return {
+    result: dict[str, Any] = {
         "id": cid,
         "label": label,
         "weight": weight,
-        "pass": passed,
+        "pass": None if not_applicable else passed,
         "value": value,
         "value_label": value_label,
         "threshold": threshold,
         "warning": warning,
     }
+    if not_applicable:
+        result["not_applicable"] = True
+    return result
 
 
 @app.get("/api/stocks/{stock_id}/buy_score")
@@ -1802,7 +1831,7 @@ def buy_score(
     token_resolved = _require_token(token, x_finmind_token)
     today = date.today()
 
-    cache_key = build_cache_key("api_buy_score_v3", stock_id=sid, asof=today.isoformat())
+    cache_key = build_cache_key("api_buy_score_v4", stock_id=sid, asof=today.isoformat())
     cached = cache.get(cache_key)
     if cached and isinstance(cached.get("criteria"), list):
         return {k: v for k, v in cached.items() if k != "ts"}
@@ -1810,6 +1839,20 @@ def buy_score(
     client = FinMindClient(api_key=token_resolved)
     warnings: list[str] = []
     criteria: list[dict[str, Any]] = []
+
+    # ── Industry classification (for not_applicable exclusions) ──────────────
+    industry: str | None = None
+    industry_cache_key = build_cache_key("api_stock_industry", stock_id=sid)
+    industry_cached = cache.get(industry_cache_key)
+    if industry_cached and "industry" in industry_cached:
+        industry = industry_cached["industry"]
+    else:
+        try:
+            industry = client.fetch_stock_industry(sid)
+            cache.set(industry_cache_key, {"industry": industry, "ts": time.time()})
+        except Exception as exc:
+            warnings.append(f"industry_fetch: {exc}")
+    excluded_criteria = _get_industry_exclusions(industry)
 
     # ── Shared data fetching ──────────────────────────────────────────────────
     fetch_start_ext = date(today.year - 4, today.month, 1)
@@ -1956,8 +1999,6 @@ def buy_score(
         warnings.append(f"debt_calc: {exc}")
 
     c3_pass = latest_debt_ratio is not None and latest_debt_ratio < 60.0
-    if c3_pass:
-        score += 2
     criteria.append(_criterion(
         "debt_ratio", "負債比 < 60%", weight=2,
         passed=c3_pass if latest_debt_ratio is not None else None,
@@ -1965,6 +2006,7 @@ def buy_score(
         value_label=f"{latest_debt_ratio:.1f}%" if latest_debt_ratio is not None else "無資料",
         threshold="< 60%",
         warning=None if latest_debt_ratio is not None else "負債比資料不足",
+        not_applicable="debt_ratio" in excluded_criteria,
     ))
 
     criteria.append(_criterion(
@@ -1974,6 +2016,7 @@ def buy_score(
         value_label=f"{latest_debt_ratio:.1f}%" if latest_debt_ratio is not None else "無資料",
         threshold="< 50%",
         warning=None if latest_debt_ratio is not None else "負債比資料不足",
+        not_applicable="debt_ratio_strict" in excluded_criteria,
     ))
     equity_ratio = (100.0 - latest_debt_ratio) if latest_debt_ratio is not None else None
     criteria.append(_criterion(
@@ -1983,6 +2026,7 @@ def buy_score(
         value_label=f"{equity_ratio:.1f}%" if equity_ratio is not None else "無資料",
         threshold="> 40%",
         warning=None if equity_ratio is not None else "資產負債資料不足",
+        not_applicable="equity_ratio" in excluded_criteria,
     ))
 
     # ── C4: 月營收 YoY 3個月中至少2個月 > 0%  [weight=1] ───────────────────
@@ -2036,6 +2080,7 @@ def buy_score(
     # ── C5: EPS YoY 3季中至少2季 > 0%  [weight=1] ───────────────────────────
     eps_positive: int = 0
     eps_yoy_values: list[float] = []
+    df_eps: pd.DataFrame = pd.DataFrame()
     try:
         df_eps = client.fetch_eps_trend(sid, fetch_start_ext, today)
         if not df_eps.empty:
@@ -2253,6 +2298,7 @@ def buy_score(
 
     # ── C10: 外資持股3個月整體淨增  [weight=1] ───────────────────────────────
     foreign_trend: list[float] = []
+    df_sh: pd.DataFrame = pd.DataFrame()
     try:
         if GoodinfoClient is not None:
             gc = GoodinfoClient()
@@ -2284,7 +2330,7 @@ def buy_score(
         warning=None if foreign_trend else "外資持股資料無法取得",
     ))
 
-    # ── v3 scoring: 24 indicators + recommendation thresholds ───────────────
+    # ── v4 scoring: not_applicable criteria excluded from pass_rate ───────────
     passed_count = sum(1 for c in criteria if c.get("pass") is True)
     eligible_count = sum(1 for c in criteria if c.get("pass") is not None)
     score = passed_count
@@ -2310,11 +2356,27 @@ def buy_score(
     try:
         spread_df = client.fetch_shareholding_spread(sid, fetch_start_ext, today)
     except Exception as exc:
-        warnings.append(f"shareholding_spread: {exc}")
+        _exc_msg = str(exc).lower()
+        if "level is register" not in _exc_msg and "sponsor" not in _exc_msg and "user level" not in _exc_msg:
+            warnings.append(f"shareholding_spread: {exc}")
     try:
         inv_data = client.fetch_inventory_and_revenue_growth(sid, fetch_start_ext, today)
     except Exception as exc:
         warnings.append(f"inventory_growth: {exc}")
+
+    # Fetch BVPS for R5
+    liq_df_risk: pd.DataFrame = pd.DataFrame()
+    try:
+        liq_df_risk = client.fetch_liquidity_ratios(sid, fetch_start_ext, today)
+    except Exception as exc:
+        warnings.append(f"liq_ratios_risk: {exc}")
+
+    # Fetch IS data for R6 (interest coverage)
+    is_df_risk: pd.DataFrame = pd.DataFrame()
+    try:
+        is_df_risk = client.fetch_financial_statements(sid, fetch_start_ext, today)
+    except Exception as exc:
+        warnings.append(f"is_data_risk: {exc}")
     
     # ============== NEW: Risk Avoidance (排雷指標) ==============
     risk_criteria = []
@@ -2385,7 +2447,7 @@ def buy_score(
                     "value_label": f"PE {current_per:.1f} > Avg*1.5",
                     "description": "當前估值偏離歷史均值過大，應避免追高"
                 })
-        except:
+        except Exception:
             pass
 
     # 3. 盈餘品質 (Sloan Ratio / 業外收支)
@@ -2421,6 +2483,137 @@ def buy_score(
             "description": "發放股利超過當期獲利，可能在消耗老本"
         })
 
+    # R4: 連續虧損 — 近4季中有2季以上 EPS < 0
+    if not df_eps.empty:
+        try:
+            recent4 = df_eps.dropna(subset=["eps"]).sort_values("quarter").tail(4)
+            negative_q = sum(1 for _, row in recent4.iterrows() if row["eps"] is not None and float(row["eps"]) < 0)
+            if negative_q >= 2:
+                risk_criteria.append({
+                    "category": "財務惡化",
+                    "name": "連續虧損",
+                    "status": "warning",
+                    "value_label": f"近4季 {negative_q} 季虧損",
+                    "description": "近4季中2季以上EPS為負，獲利能力存疑"
+                })
+        except Exception:
+            pass
+
+    # R5: 淨值低於票面 — 最新季 BVPS < 10
+    if not liq_df_risk.empty:
+        try:
+            valid_bvps = liq_df_risk[liq_df_risk["bvps"].notna()].sort_values("quarter")
+            if not valid_bvps.empty:
+                latest_bvps_r = float(valid_bvps.iloc[-1]["bvps"])
+                if latest_bvps_r < 10.0:
+                    risk_criteria.append({
+                        "category": "財務惡化",
+                        "name": "淨值低於票面",
+                        "status": "warning",
+                        "value_label": f"BVPS {latest_bvps_r:.2f} < 10",
+                        "description": "每股淨值低於票面10元，資本侵蝕風險高"
+                    })
+        except Exception:
+            pass
+
+    # R6: 利息保障倍數不足 — 營業利益/利息費用 < 2
+    if not is_df_risk.empty:
+        try:
+            def _get_latest_annual(df: pd.DataFrame, type_names: list[str]) -> float | None:
+                for t in type_names:
+                    sub = df[df["type"] == t].copy()
+                    if sub.empty:
+                        continue
+                    sub["date"] = pd.to_datetime(sub["date"])
+                    sub["year"] = sub["date"].dt.year
+                    latest_year = sub["year"].max()
+                    year_data = sub[sub["year"] == latest_year]
+                    # Taiwan IS is cumulative YTD; use the last (Dec/Q4) entry as full year
+                    q4 = year_data[year_data["date"].dt.month == 12]
+                    if not q4.empty:
+                        return float(q4.sort_values("date").iloc[-1]["value"])
+                    # YTD-cumulative: latest available quarter already contains the running total
+                    return float(year_data.sort_values("date").iloc[-1]["value"])
+                return None
+
+            op_inc = _get_latest_annual(is_df_risk, ["OperatingIncome", "ProfitFromOperations", "OperatingProfitLoss"])
+            int_exp = _get_latest_annual(is_df_risk, ["FinanceCosts", "InterestExpenses", "InterestExpense", "FinancingCosts"])
+            if op_inc is not None and int_exp is not None and abs(int_exp) > 0:
+                coverage = op_inc / abs(int_exp)
+                if coverage < 2.0:
+                    risk_criteria.append({
+                        "category": "財務惡化",
+                        "name": "利息保障倍數不足",
+                        "status": "warning",
+                        "value_label": f"ICR {coverage:.1f}x",
+                        "description": "營業利益不足支應利息費用兩倍，財務壓力大"
+                    })
+        except Exception:
+            pass
+
+    # R7: 董監質押比過高 — 全體董監質押/持股 > 50%
+    if not df_sh.empty and "total_dir_pledged" in df_sh.columns and "total_dir_shares" in df_sh.columns:
+        try:
+            df_sh_sorted = df_sh.dropna(subset=["total_dir_pledged", "total_dir_shares"]).sort_values("date")
+            if not df_sh_sorted.empty:
+                latest_row = df_sh_sorted.iloc[-1]
+                pledged = float(latest_row["total_dir_pledged"])
+                total = float(latest_row["total_dir_shares"])
+                if total > 0:
+                    pledge_ratio = pledged / total * 100
+                    if pledge_ratio > 50.0:
+                        risk_criteria.append({
+                            "category": "籌碼治理",
+                            "name": "董監質押比過高",
+                            "status": "warning",
+                            "value_label": f"質押比 {pledge_ratio:.1f}%",
+                            "description": "全體董監事質押超過自身持股半數，股價下跌恐觸發強制賣出"
+                        })
+        except Exception:
+            pass
+
+    # R8: 趨勢惡化 — 毛利率、ROE 或 負債比連續3季惡化
+    if not df_margins.empty:
+        try:
+            for metric_col, metric_name, direction in [
+                ("gross_margin", "毛利率", "down"),
+                ("operating_margin", "營業利益率", "down"),
+            ]:
+                valid_m = df_margins.dropna(subset=[metric_col]).sort_values("quarter")
+                if len(valid_m) >= 3:
+                    last3 = valid_m.tail(3)[metric_col].tolist()
+                    if direction == "down" and last3[0] > last3[1] > last3[2]:
+                        risk_criteria.append({
+                            "category": "財務惡化",
+                            "name": f"{metric_name}趨勢惡化",
+                            "status": "warning",
+                            "value_label": f"連3季下滑至 {last3[-1]:.1f}%",
+                            "description": f"{metric_name}連續3季單向下滑，盈利能力持續走弱"
+                        })
+        except Exception:
+            pass
+
+    # R8b: 負債比連續3季上升
+    if not liabilities_s.empty and not assets_debt_s.empty:
+        try:
+            q_dates = sorted(dt for dt in assets_debt_s.index if dt.month in {3, 6, 9, 12})[-5:]
+            debt_ratios = []
+            for dt in q_dates:
+                a_val = assets_debt_s.get(dt)
+                l_val = liabilities_s.get(dt)
+                if a_val and not pd.isna(a_val) and float(a_val) > 0 and l_val is not None and not pd.isna(l_val):
+                    debt_ratios.append(round(float(l_val) / float(a_val) * 100, 2))
+            if len(debt_ratios) >= 3 and debt_ratios[-3] < debt_ratios[-2] < debt_ratios[-1]:
+                risk_criteria.append({
+                    "category": "財務惡化",
+                    "name": "負債比趨勢惡化",
+                    "status": "warning",
+                    "value_label": f"連3季攀升至 {debt_ratios[-1]:.1f}%",
+                    "description": "負債比連續3季上升，財務槓桿持續擴大"
+                })
+        except Exception:
+            pass
+
     risk_score = len(risk_criteria)
     if risk_score >= 2:
         recommendation, recommendation_label = "not_recommended", "高風險避開"
@@ -2428,6 +2621,7 @@ def buy_score(
 
     payload: dict[str, Any] = {
         "stock_id": sid,
+        "industry": industry,
         "score": score,
         "max_score": max_score,
         "eligible_count": eligible_count,

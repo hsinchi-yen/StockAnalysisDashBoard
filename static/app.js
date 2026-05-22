@@ -141,7 +141,7 @@ const PLOTLY_CONFIG = {
   responsive: true,
   displaylogo: false,
   scrollZoom: false,
-  doubleClick: false,
+  doubleClick: 'reset+autosize',
   modeBarButtonsToRemove: ["lasso2d", "select2d"],
 };
 
@@ -253,12 +253,11 @@ function switchToPreviousTab() {
 }
 
 function initQuickActions() {
-  const backBtn = $("quickTabBack");
-  if (backBtn) {
-    backBtn.addEventListener("click", switchToPreviousTab);
+  // Risk badge link
+  const riskLink = $("riskBadgeLink");
+  if (riskLink) {
+    riskLink.addEventListener("click", () => switchTab("tab-buyscore", { recordHistory: true }));
   }
-
-  updateTabBackButtonState();
 }
 
 function getSavedToken() {
@@ -538,57 +537,7 @@ function plotFeedWaterfall(targetId, title, labels, measure, values) {
 }
 
 function renderFinancialFeed() {
-  const latest = dashboardState.latestSnapshot || {};
-  const price = latest.price || {};
-  const close = Number(price.close);
-  const spread = Number(price.spread);
-  const previousClose = Number.isFinite(close) && Number.isFinite(spread) ? close - spread : NaN;
-
-  const volRows = (dashboardState.volumeRows || []).filter((r) => r && Number.isFinite(Number(r.volume)));
-  const last5 = volRows.slice(-5);
-  const prev5 = volRows.slice(-10, -5);
-  const weekVol = last5.reduce((sum, r) => sum + Number(r.volume || 0), 0);
-  const weekVolPrev = prev5.reduce((sum, r) => sum + Number(r.volume || 0), 0);
-  const weekVolDeltaPct = weekVolPrev > 0 ? ((weekVol - weekVolPrev) / weekVolPrev) * 100 : NaN;
-
-  const revRows = (dashboardState.revenueRows || []).filter((r) => r && Number.isFinite(Number(r.revenue)));
-  const latestRev = revRows.length ? revRows[revRows.length - 1] : null;
-  const prevRev = revRows.length > 1 ? revRows[revRows.length - 2] : null;
-  const ma12 = latestRev && Number.isFinite(Number(latestRev.ma_12)) ? Number(latestRev.ma_12) : NaN;
-  const revDeltaPct = latestRev && prevRev && Number(prevRev.revenue) !== 0
-    ? ((Number(latestRev.revenue) - Number(prevRev.revenue)) / Number(prevRev.revenue)) * 100
-    : NaN;
-
-  animateCount($("feedTodayValue"), close, { prefix: "$", decimals: 2, duration: 300 });
-  animateCount($("feedTodayDelta"), spread, { prefix: spread > 0 ? "+" : "", decimals: 2, suffix: " 今日", duration: 280 });
-  animateCount($("feedWeekValue"), weekVol / 1000, { decimals: 0, suffix: " 千股", duration: 340 });
-  animateCount($("feedWeekDelta"), weekVolDeltaPct, { prefix: weekVolDeltaPct > 0 ? "+" : "", decimals: 1, suffix: "% vs 前5日", duration: 320 });
-  animateCount($("feedMonthValue"), latestRev ? Number(latestRev.revenue) : NaN, { decimals: 0, suffix: " 元", duration: 360 });
-  animateCount($("feedMonthDelta"), revDeltaPct, { prefix: revDeltaPct > 0 ? "+" : "", decimals: 1, suffix: "% 月變化", duration: 320 });
-
-  plotFeedWaterfall(
-    "feedTodayChart",
-    "今日資產變動",
-    ["昨收", "日內漲跌", "今日收盤"],
-    ["absolute", "relative", "total"],
-    [previousClose, spread, 0]
-  );
-
-  plotFeedWaterfall(
-    "feedWeekChart",
-    "本週交易熱度",
-    ["前5日總量", "本週增減", "本週總量"],
-    ["absolute", "relative", "total"],
-    [weekVolPrev, weekVol - weekVolPrev, 0]
-  );
-
-  plotFeedWaterfall(
-    "feedMonthChart",
-    "本月營收動能",
-    ["12月均值", "偏離", "最新營收"],
-    ["absolute", "relative", "total"],
-    [ma12, latestRev ? Number(latestRev.revenue) - ma12 : NaN, 0]
-  );
+  // Feed sections removed
 }
 
 function initOneHandControls() {
@@ -1970,29 +1919,50 @@ function renderBuyScore(data) {
   const stage2Criteria = data.criteria.filter(c => c.weight === 1);
   const allCriteria = data.criteria;
 
+  // Show industry badge if available
+  const industryBadgeEl = $("buyScoreIndustryBadge");
+  if (industryBadgeEl) {
+    if (data.industry) {
+      industryBadgeEl.textContent = data.industry;
+      industryBadgeEl.style.display = "inline-block";
+    } else {
+      industryBadgeEl.style.display = "none";
+    }
+  }
+
   function criterionHTML(c) {
     let icon, valueClass;
-    if (c.pass === true)  { icon = "✅"; valueClass = "pass"; }
-    else if (c.pass === false) { icon = "❌"; valueClass = "fail"; }
-    else { icon = "⬜"; valueClass = "unknown"; }
+    if (c.not_applicable) {
+      icon = "—"; valueClass = "unknown";
+    } else if (c.pass === true) {
+      icon = "✅"; valueClass = "pass";
+    } else if (c.pass === false) {
+      icon = "❌"; valueClass = "fail";
+    } else {
+      icon = "⬜"; valueClass = "unknown";
+    }
 
     const disabled = (c.pass === null) ? " disabled" : "";
+    const naStyle = c.not_applicable ? " style=\"opacity:0.45\"" : "";
     const weightBadge = c.weight === 2
       ? `<span class="criterion-weight-badge">×2</span>`
       : "";
-    const warning  = c.warning
+    const naTag = c.not_applicable
+      ? `<span style="font-size:10px;color:var(--text-muted);margin-left:6px;">產業不適用</span>`
+      : "";
+    const warning = c.warning && !c.not_applicable
       ? `<div class="criterion-warning">⚠ ${c.warning}</div>`
       : "";
 
     return `
-      <div class="criterion-item${disabled}">
+      <div class="criterion-item${disabled}"${naStyle}>
         <div class="criterion-icon">${icon}</div>
         <div class="criterion-body">
-          <div class="criterion-label">${c.label}${weightBadge}</div>
+          <div class="criterion-label">${c.label}${weightBadge}${naTag}</div>
           <div class="criterion-detail">${c.threshold}</div>
           ${warning}
         </div>
-        <div class="criterion-value ${valueClass}">${c.value_label || "—"}</div>
+        <div class="criterion-value ${valueClass}">${c.not_applicable ? "產業不適用" : (c.value_label || "—")}</div>
       </div>`;
   }
 
@@ -2018,19 +1988,53 @@ function renderBuyScore(data) {
   if (riskCriteria.length > 0 && riskEl && riskContainer) {
     riskEl.style.display = "block";
     if (riskLabel) riskLabel.textContent = `(觸發 ${riskScore} 項警示)`;
-    
-    riskContainer.innerHTML = riskCriteria.map(c => `
-      <div class="criterion-row" style="background:var(--bg-faint);">
-        <div class="criterion-name" style="align-items:center;">
-          <span style="color:#ef4444; margin-right:4px;">●</span> 
-          ${c.name}
-          <div class="criterion-desc" style="margin-left:12px;font-size:11px;color:var(--text-muted)">${c.description}</div>
-        </div>
-        <div class="criterion-value risk-val" style="color:#ef4444; font-weight:600;">${c.value_label}</div>
-      </div>
-    `).join("");
+
+    // Group by category
+    const groups = {};
+    riskCriteria.forEach(c => {
+      const cat = c.category || "其他";
+      if (!groups[cat]) groups[cat] = [];
+      groups[cat].push(c);
+    });
+    const catOrder = ["財務造假", "財務惡化", "籌碼治理", "籌碼排雷", "估值排雷", "品質排雷", "獲利排雷", "存貨排雷", "配息排雷", "其他"];
+    const sortedCats = Object.keys(groups).sort((a, b) => {
+      const ia = catOrder.indexOf(a), ib = catOrder.indexOf(b);
+      return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+    });
+
+    riskContainer.innerHTML = sortedCats.map(cat => {
+      const items = groups[cat];
+      const rows = items.map(c => `
+        <div class="criterion-row" style="background:var(--bg-faint);">
+          <div class="criterion-name" style="align-items:center;">
+            <span style="color:#ef4444; margin-right:4px;">●</span>
+            ${c.name}
+            <div class="criterion-desc" style="margin-left:12px;font-size:11px;color:var(--text-muted)">${c.description}</div>
+          </div>
+          <div class="criterion-value risk-val" style="color:#ef4444; font-weight:600;">${c.value_label}</div>
+        </div>`).join("");
+      return `
+        <div style="margin-top:8px;">
+          <div style="font-size:11px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;padding:4px 0 2px;border-bottom:1px solid var(--border);">
+            ${cat} <span style="font-weight:400;">(${items.length})</span>
+          </div>
+          ${rows}
+        </div>`;
+    }).join("");
   } else if (riskEl) {
     riskEl.style.display = "none";
+  }
+
+  // Update risk badge in tab-basic
+  const riskBadge = $("riskBadgeSummary");
+  const riskBadgeCount = $("riskBadgeCount");
+  if (riskBadge) {
+    if (riskCriteria.length > 0) {
+      riskBadge.style.display = "flex";
+      if (riskBadgeCount) riskBadgeCount.textContent = String(riskCriteria.length);
+    } else {
+      riskBadge.style.display = "none";
+    }
   }
   // ===================================
 }
@@ -2342,8 +2346,8 @@ function renderValuationExtra(data) {
       </div>
       <div class="val-item">
         <div class="val-label">PEG 比率</div>
-        <div class="val-value ${pegColor(peg)}">${peg !== null ? formatFloat2(peg) : "N/A"}</div>
-        <div class="val-detail">PER ${per !== null ? formatFloat2(per) : "-"} ÷ EPS CAGR ${cagr !== null ? formatFloat2(cagr) + "%" : "-"}</div>
+        <div class="val-value ${pegColor(peg)}">${peg !== null ? formatFloat2(peg) : (cagr !== null && cagr <= 0 ? "EPS衰退" : "N/A")}</div>
+        <div class="val-detail">PER ${per !== null ? formatFloat2(per) : "-"} ÷ EPS 3年CAGR ${cagr !== null && cagr > 0 ? formatFloat2(cagr) + "%" : (cagr !== null ? "衰退，PEG無參考意義" : "-")}</div>
       </div>
       <div class="val-item">
         <div class="val-label">5年平均 EPS</div>
@@ -2562,9 +2566,6 @@ async function runQuery() {
   showSkeleton("liquidityChart");
   showSkeleton("bvpsChart");
   showSkeleton("foreignHoldingChart");
-  showSkeleton("feedTodayChart");
-  showSkeleton("feedWeekChart");
-  showSkeleton("feedMonthChart");
 
   updateTokenUsage(token);
 

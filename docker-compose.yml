@@ -1,0 +1,9 @@
+services:
+  stock-dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: stock-dashboard
+    ports:
+      - "${HOST_PORT:-18000}:8000"
+    restart: unless-stopped
