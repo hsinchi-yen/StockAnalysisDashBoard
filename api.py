@@ -1541,7 +1541,7 @@ def liquidity(
     start_ext = start - pd.DateOffset(years=1)
     start_ext_date = date(int(start_ext.year), int(start_ext.month), 1)
 
-    cache_key = build_cache_key("api_liquidity_v1", stock_id=sid, start=f"{start:%Y-%m}", years=str(years), asof=today.isoformat())
+    cache_key = build_cache_key("api_liquidity_v2", stock_id=sid, start=f"{start:%Y-%m}", years=str(years), asof=today.isoformat())
     cached = cache.get(cache_key)
     if cached and isinstance(cached.get("rows"), list):
         return {"stock_id": sid, "rows": cached["rows"]}
@@ -1661,7 +1661,7 @@ def valuation_extra(
     start_ext = start - pd.DateOffset(years=4)  # need 4 years for CAGR
     start_ext_date = date(int(start_ext.year), int(start_ext.month), 1)
 
-    cache_key = build_cache_key("api_valuation_extra_v2", stock_id=sid, years=str(years), asof=today.isoformat())
+    cache_key = build_cache_key("api_valuation_extra_v3", stock_id=sid, years=str(years), asof=today.isoformat())
     cached = cache.get(cache_key)
     if cached and "graham_number" in cached:
         return {"stock_id": sid, **{k: v for k, v in cached.items() if k not in ("ts",)}}
@@ -1831,7 +1831,7 @@ def buy_score(
     token_resolved = _require_token(token, x_finmind_token)
     today = date.today()
 
-    cache_key = build_cache_key("api_buy_score_v4", stock_id=sid, asof=today.isoformat())
+    cache_key = build_cache_key("api_buy_score_v5", stock_id=sid, asof=today.isoformat())
     cached = cache.get(cache_key)
     if cached and isinstance(cached.get("criteria"), list):
         return {k: v for k, v in cached.items() if k != "ts"}

@@ -469,6 +469,130 @@ android_app/src/main/assets/static/  ← 同步 static/
 
 ---
 
+---
+
+## Hotfix: BVPS 單位錯誤 (淨值低於票面誤判)
+
+**發現日期:** 2026-05-25  
+**嚴重程度:** High — 影響 R5 風險評估 + Graham Number 估值
+
+---
+
+### 問題診斷
+
+**位置:** `datasource_finmind.py:1250` 及兩份複本
+
+**根本原因:** `fetch_liquidity_ratios()` 中計算 BVPS 時的單位不一致：
+- `eq` (EquityAttributableToOwnersOfParent) — FinMind 回傳值以 **NT$ 千元** 為單位
+- `shares_k = cap * 100` — 實際計算出的是**股數**（非千股），但變數名稱誤導性地標示為 "thousands of shares"
+- 結果：`bvps = eq / shares_k` = (NT$ 千元) / (股數) = NT$/1000 每股，**比正確值小 1000 倍**
+
+**以台積電 (2330) 驗算:**
+| 項目 | 說明 |
+|------|------|
+| `cap` | ≈ 259,303,805 (NT$ 千元，面額資本) |
+| `shares_k` | = 259,303,805 × 100 = 25,930,380,500 股 |
+| `eq` | ≈ 3,600,000,000 (NT$ 千元，股東權益) |
+| **現行 BVPS (錯誤)** | = 3,600,000,000 / 25,930,380,500 ≈ **0.14** → 觸發 R5！|
+| **正確 BVPS** | = 3,600,000,000 × 1000 / 25,930,380,500 ≈ **138.8 NT$/股** ✓ |
+
+**連帶受影響範圍:**
+- `api.py:2507` — R5 風險 "淨值低於票面" 誤判所有 BVPS > 0 的大型股
+- `api.py:1701` — `/api/valuation_extra` 的 Graham Number 用錯誤 BVPS，結果小 ~31.6 倍
+- `api.py:1564` — `/api/liquidity` 端點也回傳錯誤 BVPS 給前端圖表
+
+---
+
+### 依賴關係圖
+
+```
+datasource_finmind.py:fetch_liquidity_ratios()
+    ↓ bvps (錯誤, 1/1000)
+    ├── api.py:R5 → 買入評分風險誤判
+    ├── api.py:/api/valuation_extra → Graham Number 錯誤
+    └── api.py:/api/liquidity → 前端 BVPS 圖表顯示錯誤
+```
+
+---
+
+### Hotfix Tasks
+
+#### Task BF-1 — 修正主要 datasource_finmind.py
+**描述:** 修正 `datasource_finmind.py:1250` 的 BVPS 計算，乘以 1000 轉換 equity 單位。同時修正誤導性的變數名稱與注釋。
+
+**正確計算:**
+```python
+# 修正前 (錯誤)
+shares_k = float(cap) * 100  # thousands of shares  ← 注釋有誤，實為股數
+bvps = round(float(eq) / shares_k, 2)              # 單位錯: NT$千元 ÷ 股數
+
+# 修正後
+# eq in NT$k, cap in NT$k, par = NT$10/share
+# total_shares = cap * 1000 / 10 = cap * 100
+# bvps = eq * 1000 / total_shares = eq * 10 / cap
+total_shares = float(cap) * 100
+bvps = round(float(eq) * 1000 / total_shares, 2)
+```
+
+**Acceptance criteria:**
+- [ ] 2330 BVPS 計算結果 ≥ NT$100/股 (合理範圍 ~130–145)
+- [ ] R5 不再誤判台積電淨值低於票面
+- [ ] Graham Number 在合理範圍 (2330 約 NT$400-600)
+
+**Verification:**
+```
+# 手動測試
+curl "localhost:8000/api/liquidity?stock_id=2330&years=3" | jq '.rows[-1].bvps'
+# 預期: ~138 (非 ~0.14)
+
+curl "localhost:8000/api/valuation_extra?stock_id=2330" | jq '.graham_number'
+# 預期: ~400-600 (非 ~15-20)
+
+curl "localhost:8000/api/buy_score?stock_id=2330" | jq '.risk_criteria[] | select(.name=="淨值低於票面")'
+# 預期: 無此條目
+```
+
+**Files:** `datasource_finmind.py:1244-1250`  
+**Scope:** XS (2行修改 + 注釋)
+
+---
+
+#### Task BF-2 — 同步修正兩份複本
+**描述:** 同樣的修正套用到 `embedded_deployment/datasource_finmind.py:1221` 與 `android_app/app/src/main/python/datasource_finmind.py:1221`。
+
+**Acceptance criteria:**
+- [ ] 三個檔案的 `fetch_liquidity_ratios()` 中 bvps 計算邏輯完全一致
+- [ ] diff 三個檔案相同位置，僅行號差異
+
+**Files:** `embedded_deployment/datasource_finmind.py`, `android_app/app/src/main/python/datasource_finmind.py`  
+**Dependencies:** BF-1 完成後照樣複製  
+**Scope:** XS
+
+---
+
+#### Task BF-3 — 清除快取 + 驗收
+**描述:** 修正後清除受影響的本地快取 (`cache.py` 中的 `liq_ratios*` 條目)，確保下次請求取得重算後的正確 BVPS。
+
+**Acceptance criteria:**
+- [ ] 重啟後首次查詢 2330，BVPS 顯示正確值
+- [ ] 買入評分的 R5 "淨值低於票面" 在正常大型股上不出現
+- [ ] 舊快取不影響結果
+
+**Files:** `cache.py` (確認 TTL 或手動刪除快取檔)  
+**Dependencies:** BF-1, BF-2  
+**Scope:** XS
+
+---
+
+### Checkpoint BF — Hotfix 完成
+- [ ] `curl .../api/liquidity?stock_id=2330` → BVPS ≈ 130-145
+- [ ] `curl .../api/valuation_extra?stock_id=2330` → Graham Number 合理
+- [ ] `curl .../api/buy_score?stock_id=2330` → R5 不觸發
+- [ ] 三個 datasource_finmind.py 複本一致
+- [ ] **人工確認後合併主線**
+
+---
+
 ## Open Questions
 
 1. **外資持股資料集**: `TaiwanStockShareholdingByForeignInstitutions` 是否在目前帳號權限內？需實際測試後確認 Task 1.4 可行性。

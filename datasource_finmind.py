@@ -1243,11 +1243,12 @@ class FinMindClient:
 
             bvps = None
             if eq is not None and cap is not None and not pd.isna(eq) and not pd.isna(cap) and float(cap) > 0:
-                # IssuedCapital is in NT$ thousand; 1 share = NT$10 par
-                # shares = capital_NT$ / 10  → capital_k*1000 / 10 = capital_k * 100 (千股)
-                shares_k = float(cap) * 100  # thousands of shares
-                if shares_k > 0:
-                    bvps = round(float(eq) / shares_k, 2)
+                # eq and cap are both in NT$ thousands from FinMind
+                # total_shares = cap(NT$k) * 1000 / 10 = cap * 100  (shares)
+                # bvps = eq(NT$k) * 1000 / total_shares = eq * 1000 / (cap * 100) = eq * 10 / cap
+                total_shares = float(cap) * 100
+                if total_shares > 0:
+                    bvps = round(float(eq) * 1000 / total_shares, 2)
 
             q_num = (ts.month - 1) // 3 + 1
             rows.append({

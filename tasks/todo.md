@@ -63,6 +63,23 @@
 
 ---
 
+---
+
+## Hotfix: BVPS 單位錯誤 (2026-05-25)
+
+> 詳細分析見 [plan.md#hotfix-bvps](plan.md)
+
+- [x] **Task BF-1** — 修正 `datasource_finmind.py:1244-1250` BVPS 計算 (`eq * 1000 / total_shares`)
+- [x] **Task BF-2** — 同步修正兩份複本 (`embedded_deployment/`, `android_app/`)
+- [x] **Task BF-3** — 升版快取鍵 (`liquidity_v2`, `valuation_extra_v3`, `buy_score_v5`) 強制重算
+
+### ✅ Checkpoint BF
+- [ ] 2330 BVPS ≈ 130–145 NT$/股（非 0.14）
+- [ ] R5 "淨值低於票面" 在台積電不觸發
+- [ ] Graham Number 合理 (~400–600)
+
+---
+
 ## 並行策略（同時可開發）
 
 ```
