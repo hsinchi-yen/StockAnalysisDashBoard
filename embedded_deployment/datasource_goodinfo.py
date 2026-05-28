@@ -155,6 +155,35 @@ class GoodinfoClient:
         return cookie_val, excel_days
 
     def _fetch_html(self, stock_id: str, rpt_cat: str, timeout: float = 30.0) -> str:
+        """Fetch financial HTML, retrying transient failures and unsolved challenges.
+
+        Goodinfo intermittently returns HTTP 5xx or re-serves the JS-challenge page
+        (no real tables) even after the cookie is set. Retry with backoff so a single
+        flaky response does not surface as a hard ROE/ROA failure.
+        """
+        attempts = 3
+        last_exc: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                html = self._fetch_html_once(stock_id, rpt_cat, timeout)
+            except requests.RequestException as exc:
+                last_exc = exc
+                logger.debug("Goodinfo: HTTP error for %s/%s (attempt %d): %s", stock_id, rpt_cat, attempt + 1, exc)
+            else:
+                # A real financial page is large and contains <table> markup.
+                # A still-challenged / error page is tiny — retry it.
+                if len(html) >= 5000 and "<table" in html.lower():
+                    return html
+                last_exc = GoodinfoError(f"Goodinfo returned an unusable page ({len(html)} chars).")
+                logger.debug("Goodinfo: unusable page for %s/%s (attempt %d, %d chars)", stock_id, rpt_cat, attempt + 1, len(html))
+            if attempt < attempts - 1:
+                time.sleep(self.throttle_seconds * (attempt + 1) + random.uniform(0.0, 0.5))
+
+        if isinstance(last_exc, GoodinfoError):
+            raise last_exc
+        raise GoodinfoError(f"Goodinfo fetch failed after {attempts} attempts: {last_exc}")
+
+    def _fetch_html_once(self, stock_id: str, rpt_cat: str, timeout: float = 30.0) -> str:
         jitter = random.uniform(0.0, 0.4)
         time.sleep(self.throttle_seconds + jitter)
         params = {"RPT_CAT": rpt_cat, "STOCK_ID": str(stock_id).strip()}
