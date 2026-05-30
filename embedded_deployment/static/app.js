@@ -175,7 +175,6 @@ const dashboardState = {
   roeRoaRows: [],
   debtRatioRows: [],
   fcfData: null,
-  fcfQuarterlyData: null,
   dcfData: null,
   shareholdingData: null,
   turnoverDaysRows: [],
@@ -1103,7 +1102,7 @@ function plotFreeCashFlow(data, stockId, years) {
     return;
   }
 
-  const labels = rows.map((r) => r.is_full_year === false ? `${r.year}*` : String(r.year));
+  const labels = rows.map((r) => String(r.year));
   const opcf = rows.map((r) => r.operating_cf !== null ? r.operating_cf / 1000 : null); // convert to 百萬
   const capex = rows.map((r) => r.capex !== null ? -r.capex / 1000 : null); // show as negative bar
   const fcf = rows.map((r) => r.fcf !== null ? r.fcf / 1000 : null);
@@ -1168,7 +1167,7 @@ function plotFreeCashFlow(data, stockId, years) {
   const avgFcf = data.fcf_avg;
   const avgPct = data.fcf_avg_pct_capital;
   const tableRows = [...rows].reverse().map((r) => [
-    r.is_full_year === false ? `${r.quarter_label || r.year}（累計）` : String(r.year),
+    String(r.year),
     formatCF(r.operating_cf),
     formatCF(r.capex),
     formatCF(r.fcf),
@@ -1187,74 +1186,6 @@ function plotFreeCashFlow(data, stockId, years) {
   renderTable(
     $("fcfTable"),
     ["年度", "營業現金流", "資本支出", "自由現金流", "佔股本 %"],
-    tableRows
-  );
-}
-
-// ── NEW: Free Cash Flow (quarterly cumulative) ───────────────────────────────
-
-function plotFreeCashFlowQuarterly(data, stockId, years) {
-  clearSkeleton("fcfQuarterlyChart");
-  const rows = (data && data.rows) || [];
-  const el = $("fcfQuarterlyChart");
-  if (!rows.length) {
-    if (el) el.textContent = "查無季累積自由現金流量資料（需要現金流量表資料）。";
-    return;
-  }
-
-  const labels = rows.map((r) => r.quarter_label);
-  const opcf = rows.map((r) => r.operating_cf !== null ? r.operating_cf / 1000 : null); // 百萬
-  const capex = rows.map((r) => r.capex !== null ? -r.capex / 1000 : null);
-  const fcf = rows.map((r) => r.fcf !== null ? r.fcf / 1000 : null);
-
-  const traces = [
-    {
-      x: labels,
-      y: opcf,
-      type: "bar",
-      name: "營業現金流（累計）",
-      marker: { color: "#3b82f6", opacity: 0.75 },
-      hovertemplate: "%{x}<br>營業CF：%{y:,.1f} M<extra></extra>",
-    },
-    {
-      x: labels,
-      y: capex,
-      type: "bar",
-      name: "資本支出（負）",
-      marker: { color: "#f97316", opacity: 0.75 },
-      hovertemplate: "%{x}<br>資本支出：%{y:,.1f} M<extra></extra>",
-    },
-    {
-      x: labels,
-      y: fcf,
-      type: "scatter",
-      mode: "lines+markers",
-      name: "自由現金流（累計）",
-      line: { color: "#22c55e", width: 2 },
-      marker: { color: "#22c55e", size: 6 },
-      connectgaps: false,
-      hovertemplate: "%{x}<br>自由CF：%{y:,.1f} M<extra></extra>",
-    },
-  ];
-
-  const layout = baseChartLayout(`${stockId} 自由現金流量（季累積，${years}年）`, {
-    margin: isCompactViewport() ? { l: 44, r: 20, t: 48, b: 64 } : { l: 60, r: 30, t: 50, b: 60 },
-    barmode: "group",
-    xaxis: { type: "category", tickangle: -45 },
-    yaxis: { title: "金額（百萬元）", tickformat: ",.0f", zeroline: true },
-  });
-
-  Plotly.newPlot("fcfQuarterlyChart", traces, layout, PLOTLY_CONFIG);
-
-  const tableRows = [...rows].reverse().map((r) => [
-    r.quarter_label,
-    formatCF(r.operating_cf),
-    formatCF(r.capex),
-    formatCF(r.fcf),
-  ]);
-  renderTable(
-    $("fcfQuarterlyTable"),
-    ["季度", "營業現金流（累計）", "資本支出", "自由現金流（累計）"],
     tableRows
   );
 }
@@ -1988,29 +1919,50 @@ function renderBuyScore(data) {
   const stage2Criteria = data.criteria.filter(c => c.weight === 1);
   const allCriteria = data.criteria;
 
+  // Show industry badge if available
+  const industryBadgeEl = $("buyScoreIndustryBadge");
+  if (industryBadgeEl) {
+    if (data.industry) {
+      industryBadgeEl.textContent = data.industry;
+      industryBadgeEl.style.display = "inline-block";
+    } else {
+      industryBadgeEl.style.display = "none";
+    }
+  }
+
   function criterionHTML(c) {
     let icon, valueClass;
-    if (c.pass === true)  { icon = "✅"; valueClass = "pass"; }
-    else if (c.pass === false) { icon = "❌"; valueClass = "fail"; }
-    else { icon = "⬜"; valueClass = "unknown"; }
+    if (c.not_applicable) {
+      icon = "—"; valueClass = "unknown";
+    } else if (c.pass === true) {
+      icon = "✅"; valueClass = "pass";
+    } else if (c.pass === false) {
+      icon = "❌"; valueClass = "fail";
+    } else {
+      icon = "⬜"; valueClass = "unknown";
+    }
 
     const disabled = (c.pass === null) ? " disabled" : "";
+    const naStyle = c.not_applicable ? " style=\"opacity:0.45\"" : "";
     const weightBadge = c.weight === 2
       ? `<span class="criterion-weight-badge">×2</span>`
       : "";
-    const warning  = c.warning
+    const naTag = c.not_applicable
+      ? `<span style="font-size:10px;color:var(--text-muted);margin-left:6px;">產業不適用</span>`
+      : "";
+    const warning = c.warning && !c.not_applicable
       ? `<div class="criterion-warning">⚠ ${c.warning}</div>`
       : "";
 
     return `
-      <div class="criterion-item${disabled}">
+      <div class="criterion-item${disabled}"${naStyle}>
         <div class="criterion-icon">${icon}</div>
         <div class="criterion-body">
-          <div class="criterion-label">${c.label}${weightBadge}</div>
+          <div class="criterion-label">${c.label}${weightBadge}${naTag}</div>
           <div class="criterion-detail">${c.threshold}</div>
           ${warning}
         </div>
-        <div class="criterion-value ${valueClass}">${c.value_label || "—"}</div>
+        <div class="criterion-value ${valueClass}">${c.not_applicable ? "產業不適用" : (c.value_label || "—")}</div>
       </div>`;
   }
 
@@ -2036,17 +1988,39 @@ function renderBuyScore(data) {
   if (riskCriteria.length > 0 && riskEl && riskContainer) {
     riskEl.style.display = "block";
     if (riskLabel) riskLabel.textContent = `(觸發 ${riskScore} 項警示)`;
-    
-    riskContainer.innerHTML = riskCriteria.map(c => `
-      <div class="criterion-row" style="background:var(--bg-faint);">
-        <div class="criterion-name" style="align-items:center;">
-          <span style="color:#ef4444; margin-right:4px;">●</span> 
-          ${c.name}
-          <div class="criterion-desc" style="margin-left:12px;font-size:11px;color:var(--text-muted)">${c.description}</div>
-        </div>
-        <div class="criterion-value risk-val" style="color:#ef4444; font-weight:600;">${c.value_label}</div>
-      </div>
-    `).join("");
+
+    // Group by category
+    const groups = {};
+    riskCriteria.forEach(c => {
+      const cat = c.category || "其他";
+      if (!groups[cat]) groups[cat] = [];
+      groups[cat].push(c);
+    });
+    const catOrder = ["財務造假", "財務惡化", "籌碼治理", "籌碼排雷", "估值排雷", "品質排雷", "獲利排雷", "存貨排雷", "配息排雷", "其他"];
+    const sortedCats = Object.keys(groups).sort((a, b) => {
+      const ia = catOrder.indexOf(a), ib = catOrder.indexOf(b);
+      return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+    });
+
+    riskContainer.innerHTML = sortedCats.map(cat => {
+      const items = groups[cat];
+      const rows = items.map(c => `
+        <div class="criterion-row" style="background:var(--bg-faint);">
+          <div class="criterion-name" style="align-items:center;">
+            <span style="color:#ef4444; margin-right:4px;">●</span>
+            ${c.name}
+            <div class="criterion-desc" style="margin-left:12px;font-size:11px;color:var(--text-muted)">${c.description}</div>
+          </div>
+          <div class="criterion-value risk-val" style="color:#ef4444; font-weight:600;">${c.value_label}</div>
+        </div>`).join("");
+      return `
+        <div style="margin-top:8px;">
+          <div style="font-size:11px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;padding:4px 0 2px;border-bottom:1px solid var(--border);">
+            ${cat} <span style="font-weight:400;">(${items.length})</span>
+          </div>
+          ${rows}
+        </div>`;
+    }).join("");
   } else if (riskEl) {
     riskEl.style.display = "none";
   }
@@ -2180,33 +2154,79 @@ function plotRevenueYoY(revenueRows, stockId) {
     if (el) el.textContent = "查無營收資料。";
     return;
   }
+  // String-based prev-year key: avoid Date/timezone arithmetic that can shift
+  // "YYYY-MM-01" by one day across the year boundary in UTC+8 hosts and then
+  // miss the prev-year lookup entirely. r.month from backend is "YYYY-MM-DD".
   const byMonth = new Map(revenueRows.map((r) => [r.month, r.revenue]));
-  const rows = [];
+  const prevYearKey = (monthStr) => {
+    if (typeof monthStr !== "string" || monthStr.length < 7) return null;
+    const y = parseInt(monthStr.slice(0, 4), 10);
+    if (!Number.isFinite(y)) return null;
+    return `${y - 1}${monthStr.slice(4)}`;
+  };
+
+  // Build a fully-aligned series indexed by month (keep nulls for gaps so the
+  // x-axis is continuous and the MA trend line doesn't compress time).
+  const allX = [];
+  const yoyAligned = [];
   for (const r of revenueRows) {
-    if (r.revenue === null || r.month === null) continue;
-    const thisMonth = new Date(r.month);
-    const prevYear = new Date(thisMonth);
-    prevYear.setFullYear(prevYear.getFullYear() - 1);
-    const prevKey = prevYear.toISOString().slice(0, 7) + "-01";
-    const prevVal = byMonth.get(prevKey);
-    if (prevVal !== null && prevVal !== undefined && prevVal !== 0) {
-      rows.push({ month: r.month, yoy: ((r.revenue - prevVal) / Math.abs(prevVal)) * 100 });
+    if (r.month === null || r.month === undefined) continue;
+    allX.push(r.month);
+    if (r.revenue === null || r.revenue === undefined) {
+      yoyAligned.push(null);
+      continue;
+    }
+    const pKey = prevYearKey(r.month);
+    const prevVal = pKey ? byMonth.get(pKey) : undefined;
+    if (prevVal === null || prevVal === undefined || prevVal === 0) {
+      yoyAligned.push(null);
+    } else {
+      yoyAligned.push(((r.revenue - prevVal) / Math.abs(prevVal)) * 100);
     }
   }
-  if (rows.length === 0) {
+
+  const validCount = yoyAligned.filter((v) => v !== null).length;
+  if (validCount === 0) {
     if (el) el.textContent = "YoY 資料不足（需要至少 13 個月的營收資料）。";
     return;
   }
-  const x = rows.map((r) => r.month);
-  const y = rows.map((r) => r.yoy);
-  const traces = [{
-    x, y, type: "bar", name: "月營收 YoY (%)",
-    marker: { color: y.map((v) => (v >= 0 ? "#10b981" : "#ef4444")) },
-    hovertemplate: "%{x|%Y-%m}<br>YoY：%{y:.1f}%<extra></extra>",
-  }];
+
+  // 3-month trailing MA over yoyAligned (skips nulls inside the window)
+  const ma3 = yoyAligned.map((_, i) => {
+    const win = yoyAligned.slice(Math.max(0, i - 2), i + 1).filter((v) => v !== null);
+    if (win.length < 2) return null;
+    return win.reduce((a, b) => a + b, 0) / win.length;
+  });
+
+  const traces = [
+    {
+      x: allX,
+      y: yoyAligned,
+      type: "bar",
+      name: "月營收 YoY (%)",
+      marker: {
+        color: yoyAligned.map((v) =>
+          v === null ? "rgba(0,0,0,0)" : v >= 0 ? "#10b981" : "#ef4444"
+        ),
+      },
+      hovertemplate: "%{x|%Y-%m}<br>YoY：%{y:.1f}%<extra></extra>",
+    },
+    {
+      x: allX,
+      y: ma3,
+      type: "scatter",
+      mode: "lines+markers",
+      name: "YoY 3 個月趨勢線",
+      line: { color: "#1f2937", width: 2, dash: "dot" },
+      marker: { size: 4, color: "#1f2937" },
+      connectgaps: false,
+      hovertemplate: "%{x|%Y-%m}<br>YoY MA3：%{y:.1f}%<extra></extra>",
+    },
+  ];
   const layout = baseChartLayout(`${stockId} 月營收 YoY 成長率`, {
     xaxis: { tickformat: "%Y-%m" },
     yaxis: { title: "YoY (%)", tickformat: ".1f", zeroline: true },
+    legend: { orientation: "h", x: 0, y: 1.12 },
   });
   Plotly.newPlot("revenueYoyChart", traces, layout, PLOTLY_CONFIG);
 }
@@ -2372,8 +2392,8 @@ function renderValuationExtra(data) {
       </div>
       <div class="val-item">
         <div class="val-label">PEG 比率</div>
-        <div class="val-value ${pegColor(peg)}">${peg !== null ? formatFloat2(peg) : "N/A"}</div>
-        <div class="val-detail">PER ${per !== null ? formatFloat2(per) : "-"} ÷ EPS CAGR ${cagr !== null ? formatFloat2(cagr) + "%" : "-"}</div>
+        <div class="val-value ${pegColor(peg)}">${peg !== null ? formatFloat2(peg) : (cagr !== null && cagr <= 0 ? "EPS衰退" : "N/A")}</div>
+        <div class="val-detail">PER ${per !== null ? formatFloat2(per) : "-"} ÷ EPS 3年CAGR ${cagr !== null && cagr > 0 ? formatFloat2(cagr) + "%" : (cagr !== null ? "衰退，PEG無參考意義" : "-")}</div>
       </div>
       <div class="val-item">
         <div class="val-label">5年平均 EPS</div>
@@ -2495,7 +2515,6 @@ function rerenderDashboard() {
   plotRoeRoa(dashboardState.roeRoaRows, sid);
   plotDebtRatio(dashboardState.debtRatioRows, sid);
   if (dashboardState.fcfData) plotFreeCashFlow(dashboardState.fcfData, sid, years);
-  if (dashboardState.fcfQuarterlyData) plotFreeCashFlowQuarterly(dashboardState.fcfQuarterlyData, sid, years);
   if (dashboardState.turnoverDaysRows && dashboardState.turnoverDaysRows.length > 0) plotTurnoverDays(dashboardState.turnoverDaysRows, sid);
   if (dashboardState.peRiverData) plotPERiver(dashboardState.peRiverData, sid);
   renderTrendSummary(dashboardState.revenueRows, dashboardState.priceRows, dashboardState.dividendYieldRows);
@@ -2584,7 +2603,6 @@ async function runQuery() {
   showSkeleton("buyScoreSkeleton");
   showSkeleton("debtRatioChart");
   showSkeleton("fcfChart");
-  showSkeleton("fcfQuarterlyChart");
   showSkeleton("dcfResult");
   showSkeleton("shareholdingTable");
   showSkeleton("turnoverDaysChart");
@@ -2613,7 +2631,6 @@ async function runQuery() {
   const pDcf = fetchJson(`${base}/dcf?years=${yr}&growth_rate=${g}&discount_rate=${r}&margin_of_safety=${mos}`, token);
   const pDebt = fetchJson(`${base}/debt_ratio?years=${yr}`, token);
   const pFcf = fetchJson(`${base}/free_cash_flow?years=${yr}`, token);
-  const pFcfQuarterly = fetchJson(`${base}/free_cash_flow_quarterly?years=${yr}`, token);
   const pShareholding = fetchJson(`${base}/shareholding`, token);
   const pTurnoverDays = fetchJson(`${base}/turnover_days?years=${yr}`, token);
   const pPeRiver = fetchJson(`${base}/pe_river?years=${yr}`, token);
@@ -2627,7 +2644,7 @@ async function runQuery() {
 
   const allPromises = [
     pLatest, pRevenue, pPrice, pDYield, pDivCash, pVolume, pRoeRoa, pDcf,
-    pDebt, pFcf, pFcfQuarterly, pShareholding, pTurnoverDays, pPeRiver,
+    pDebt, pFcf, pShareholding, pTurnoverDays, pPeRiver,
     pMargins, pEpsTrend, pLiquidity, pForeignHolding, pValuationExtra,
     pBuyScore,
   ];
@@ -2673,8 +2690,35 @@ async function runQuery() {
     ]);
 
     const inst = latest.institutional || [];
+    const instStatus = latest.institutional_status || (inst.length ? "fresh" : "unavailable");
+    const instAsOf = latest.institutional_as_of || null;
+    const instLag = Number(latest.institutional_lag_days || 0);
+    const noteEl = $("institutionalNote");
+    if (noteEl) {
+      let noteText = "";
+      let noteClass = "chart-note";
+      if (instStatus === "fresh" && instAsOf) {
+        noteText = `資料截至 ${instAsOf}`;
+      } else if (instStatus === "stale" && instAsOf) {
+        noteText = `資料截至 ${instAsOf}（延遲 ${instLag} 個交易日，T86 尚未更新最新交易日）`;
+        noteClass = "chart-note chart-note-warn";
+      } else if (instStatus === "unavailable") {
+        noteText = "法人資料尚未公布（TWSE T86 通常於盤後 15:30 後釋出，FinMind 同步可能再延遲數分鐘）。";
+        noteClass = "chart-note chart-note-warn";
+      }
+      if (noteText) {
+        noteEl.textContent = noteText;
+        noteEl.className = noteClass;
+        noteEl.style.display = "";
+      } else {
+        noteEl.style.display = "none";
+      }
+    }
     if (inst.length === 0) {
-      $("institutional").textContent = "查無法人買賣資訊。";
+      $("institutional").textContent =
+        instStatus === "unavailable"
+          ? "法人買賣資料尚未公布，請於盤後 16:30 後重新查詢。"
+          : "查無法人買賣資訊。";
     } else {
       renderTable(
         $("institutional"),
@@ -2837,21 +2881,6 @@ async function runQuery() {
     if (el) {
       el.classList.remove("skeleton-section");
       el.textContent = "現金流量資料載入失敗: " + err.message;
-    }
-    onDone();
-  });
-
-  // FCF quarterly cumulative — slow, independent
-  pFcfQuarterly.then((data) => {
-    dashboardState.fcfQuarterlyData = data;
-    plotFreeCashFlowQuarterly(data, stockId, years);
-    onDone();
-  }).catch((err) => {
-    console.error("fcf_quarterly:", err);
-    const el = $("fcfQuarterlyChart");
-    if (el) {
-      el.classList.remove("skeleton-section");
-      el.textContent = "季累積現金流量資料載入失敗: " + err.message;
     }
     onDone();
   });

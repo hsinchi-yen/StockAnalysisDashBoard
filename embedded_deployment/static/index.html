@@ -116,6 +116,7 @@
           </section>
           <section class="card">
             <h2>法人買賣</h2>
+            <p id="institutionalNote" class="chart-note" style="display:none;"></p>
             <div id="institutional" class="skeleton-section" style="min-height:80px;"></div>
           </section>
         </section>
@@ -157,7 +158,7 @@
         <!-- 月營收 YoY 成長率 -->
         <section class="card">
           <h2>月營收 YoY 成長率 (%)</h2>
-          <p class="chart-note">與去年同月相比的成長率。綠色代表正成長，紅色代表衰退。</p>
+          <p class="chart-note">與去年同月相比的成長率。綠色代表正成長，紅色代表衰退；虛線為 3 個月移動平均，呈現整體趨勢方向。</p>
           <div id="revenueYoyChart" class="chart skeleton-section"></div>
         </section>
 
@@ -257,21 +258,11 @@
 
         <section class="card">
           <h2>自由現金流量（歷年）</h2>
-          <p class="chart-note">自由現金流量 = 營業活動現金流量 − 資本支出（取年度 Q4 全年值）。標示 <code>*</code> 者為當年度尚未結算、以最新一季累計值呈現的部分年度，不納入平均計算。</p>
+          <p class="chart-note">自由現金流量 = 營業活動現金流量 − 資本支出（取年度 Q4）。</p>
           <div id="fcfChart" class="chart skeleton-section"></div>
           <details>
             <summary>資料表</summary>
             <div id="fcfTable"></div>
-          </details>
-        </section>
-
-        <section class="card">
-          <h2>自由現金流量（季累積）</h2>
-          <p class="chart-note">每一季為該會計年度的累計值（Q1、上半年、前三季、全年），會在年初歸零重新累計。資料點較歷年圖更密集，依上方年份區間顯示。</p>
-          <div id="fcfQuarterlyChart" class="chart skeleton-section"></div>
-          <details>
-            <summary>資料表</summary>
-            <div id="fcfQuarterlyTable"></div>
           </details>
         </section>
 
@@ -342,7 +333,7 @@
         <section class="card buy-score-header" id="buyScoreHeader" style="display:none">
           <div class="buy-score-top">
             <div>
-              <div class="buy-score-label">買入評分</div>
+              <div class="buy-score-label">買入評分 <span id="buyScoreIndustryBadge" style="display:none;font-size:11px;font-weight:500;background:var(--bg-faint);border:1px solid var(--border);border-radius:4px;padding:1px 6px;margin-left:6px;color:var(--text-muted);vertical-align:middle;"></span></div>
               <div class="buy-score-total-row">
                 <span id="buyScoreTotal" class="buy-score-number">—</span>
                 <span id="buyScoreDenom" class="buy-score-denom">/24</span>
@@ -413,6 +404,6 @@
       </footer>
     </main>
 
-    <script src="/static/app.js?v=25"></script>
+    <script src="/static/app.js?v=27"></script>
   </body>
 </html>
