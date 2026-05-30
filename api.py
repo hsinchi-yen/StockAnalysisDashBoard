@@ -1126,7 +1126,7 @@ def free_cash_flow(
     start_ext_date = date(int(start_ext.year), int(start_ext.month), 1)
 
     cache_key = build_cache_key(
-        "api_fcf_v1",
+        "api_fcf_v2",
         stock_id=sid,
         start=f"{start:%Y-%m}",
         years=str(years),
@@ -1161,18 +1161,21 @@ def free_cash_flow(
         fcf_pct: float | None = None
         if fcf_val is not None and share_capital and share_capital != 0:
             fcf_pct = round(float(fcf_val) / share_capital * 100, 2)
+        is_full_year = bool(r["is_full_year"]) if "is_full_year" in r and not pd.isna(r["is_full_year"]) else True
         rows.append({
             "year": int(r["year"]),
             "operating_cf": None if opcf_val is None or pd.isna(opcf_val) else round(float(opcf_val), 0),
             "capex": None if capex_val is None or pd.isna(capex_val) else round(float(capex_val), 0),
             "fcf": None if fcf_val is None or pd.isna(fcf_val) else round(float(fcf_val), 0),
             "fcf_pct_capital": fcf_pct,
+            "quarter_label": str(r["quarter_label"]) if "quarter_label" in r and not pd.isna(r["quarter_label"]) else f"{int(r['year'])} Q4",
+            "is_full_year": is_full_year,
         })
 
-    # Averages
-    valid_fcf = [float(r["fcf"]) for r in rows if r["fcf"] is not None]
+    # Averages — full fiscal years only, so a partial in-progress year doesn't skew it
+    valid_fcf = [float(r["fcf"]) for r in rows if r["fcf"] is not None and r["is_full_year"]]
     fcf_avg = round(sum(valid_fcf) / len(valid_fcf), 0) if valid_fcf else None
-    valid_pct = [float(r["fcf_pct_capital"]) for r in rows if r["fcf_pct_capital"] is not None]
+    valid_pct = [float(r["fcf_pct_capital"]) for r in rows if r["fcf_pct_capital"] is not None and r["is_full_year"]]
     fcf_avg_pct = round(sum(valid_pct) / len(valid_pct), 2) if valid_pct else None
 
     cache.set(
@@ -1192,6 +1195,63 @@ def free_cash_flow(
         "fcf_avg": fcf_avg,
         "fcf_avg_pct_capital": fcf_avg_pct,
     }
+
+
+@app.get("/api/stocks/{stock_id}/free_cash_flow_quarterly")
+def free_cash_flow_quarterly(
+    stock_id: str,
+    years: int = Query(default=5, ge=1, le=20),
+    token: str | None = Query(default=None),
+    x_finmind_token: str | None = Header(default=None, alias="X-FinMind-Token"),
+) -> dict[str, Any]:
+    """Quarterly cumulative (YTD) Free Cash Flow = Operating CF − CapEx.
+
+    Surfaces every filed quarter within the selected year range — many more data
+    points than the annual (Q4-only) view.
+    """
+    sid = stock_id.strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="stock_id is required")
+
+    token_resolved = _require_token(token, x_finmind_token)
+    start, _end, today = _compute_month_range(years)
+    start_ext = start - pd.DateOffset(years=1)
+    start_ext_date = date(int(start_ext.year), int(start_ext.month), 1)
+
+    cache_key = build_cache_key(
+        "api_fcf_quarterly_v1",
+        stock_id=sid,
+        start=f"{start:%Y-%m}",
+        years=str(years),
+        asof=today.isoformat(),
+    )
+    cached = cache.get(cache_key)
+    if cached and isinstance(cached.get("rows"), list):
+        return {"stock_id": sid, "rows": cached["rows"]}
+
+    try:
+        client = FinMindClient(api_key=token_resolved)
+        df = client.fetch_quarterly_fcf_data(sid, start_ext_date, today)
+    except FinMindError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    rows: list[dict[str, Any]] = []
+    if not df.empty:
+        df = df[pd.to_datetime(df["quarter"], errors="coerce") >= start]
+        for _, r in df.iterrows():
+            opcf_val = r.get("operating_cf")
+            capex_val = r.get("capex")
+            fcf_val = r.get("fcf")
+            rows.append({
+                "quarter": str(r["quarter"]),
+                "quarter_label": str(r["quarter_label"]),
+                "operating_cf": None if opcf_val is None or pd.isna(opcf_val) else round(float(opcf_val), 0),
+                "capex": None if capex_val is None or pd.isna(capex_val) else round(float(capex_val), 0),
+                "fcf": None if fcf_val is None or pd.isna(fcf_val) else round(float(fcf_val), 0),
+            })
+
+    cache.set(cache_key, {"ts": time.time(), "rows": rows})
+    return {"stock_id": sid, "rows": rows}
 
 
 # ---------------------------------------------------------------------------
@@ -2216,6 +2276,10 @@ def buy_score(
     op_prior_avg: float | None = None
     nm_recent_avg: float | None = None
     nm_prior_avg: float | None = None
+    # Pre-initialise so R8 trend-degradation block (uses df_margins.empty) and
+    # R8b (uses liabilities_s/assets_debt_s) don't UnboundLocalError when their
+    # respective fetch raises and the except path skips assignment.
+    df_margins = pd.DataFrame()
     try:
         df_margins = client.fetch_margin_ratios(sid, fetch_start_ext, today)
         if not df_margins.empty:

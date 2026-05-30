@@ -683,78 +683,51 @@ class FinMindClient:
     ) -> tuple[pd.DataFrame, Optional[float]]:
         """Annual Free Cash Flow = Operating CF - |CapEx|.
 
-        Taiwan cash flow statements report cumulative YTD. We use the Q4 (December)
-        entry for each year as the annual total.
+        Taiwan cash-flow statements are cumulative YTD. For each year we pick the
+        *latest available* quarter-end so the in-progress current year stays
+        visible (marked is_full_year=False); fully reported years use Q4.
 
         Returns:
             (df, share_capital)
-            df: DataFrame with columns [year, operating_cf, capex, fcf]
-                - capex is the absolute value of capital expenditures
-                - fcf = operating_cf - capex
+            df columns: [year, operating_cf, capex, fcf, quarter_label, is_full_year]
             share_capital: IssuedCapital from balance sheet (NT$千) or None
         """
         cf = self.fetch_cash_flows_statement(stock_id, start_date, end_date, timeout)
         bs = self.fetch_balance_sheet(stock_id, start_date, end_date, timeout)
 
-        empty_df = pd.DataFrame(columns=["year", "operating_cf", "capex", "fcf"])
+        empty_df = pd.DataFrame(columns=["year", "operating_cf", "capex", "fcf", "quarter_label", "is_full_year"])
 
         if cf.empty:
             return empty_df, None
 
-        # ── Extract operating CF ────────────────────────────────────────
-        opcf_types = [
-            "NetCashInflowFromOperatingActivities",
-            "CashFlowsFromOperatingActivities",
-            "NetCashProvidedByUsedInOperatingActivities",
-            "OperatingActivities",
-        ]
-        opcf_series: pd.Series | None = None
-        for t in opcf_types:
-            sub = cf[cf["type"] == t].drop_duplicates(subset=["date"], keep="last")
-            if not sub.empty:
-                opcf_series = pd.Series(
-                    sub["value"].values, index=pd.to_datetime(sub["date"]), dtype=float
-                ).sort_index()
-                break
-
-        # ── Extract CapEx ───────────────────────────────────────────────
-        capex_types = [
-            "AcquisitionOfPropertyPlantAndEquipment",
-            "CashOutflowForAcquisitionOfPropertyPlantAndEquipment",
-            "PaymentsForAcquisitionOfPropertyPlantAndEquipment",
-            "PropertyAndPlantAndEquipment",
-            "PurchaseOfPropertyPlantAndEquipmentIntangibleAssetsAndOtherLongTermAssets",
-        ]
-        capex_series: pd.Series | None = None
-        for t in capex_types:
-            sub = cf[cf["type"] == t].drop_duplicates(subset=["date"], keep="last")
-            if not sub.empty:
-                capex_series = pd.Series(
-                    sub["value"].values, index=pd.to_datetime(sub["date"]), dtype=float
-                ).sort_index()
-                break
-
+        opcf_series, capex_series = self._extract_cf_series(cf)
         if opcf_series is None:
             return empty_df, None
 
-        # Use Q4 (December) entries for annual values
-        opcf_annual = opcf_series[opcf_series.index.month == 12]
-        capex_annual = (
-            capex_series[capex_series.index.month == 12] if capex_series is not None else pd.Series(dtype=float)
-        )
-
         rows = []
-        for dt, opcf_val in opcf_annual.items():
-            year = dt.year
-            capex_val = capex_annual.get(dt) if dt in capex_annual.index else None
+        years_seen = sorted({int(dt.year) for dt in opcf_series.index})
+        for year in years_seen:
+            year_opcf = opcf_series[opcf_series.index.year == year]
+            if year_opcf.empty:
+                continue
+            dt = max(year_opcf.index)  # latest available quarter-end in this year
+            opcf_val = year_opcf[dt]
+            if pd.isna(opcf_val):
+                continue
+
+            capex_val = capex_series.get(dt) if capex_series is not None and dt in capex_series.index else None
             capex_abs = abs(float(capex_val)) if capex_val is not None and not pd.isna(capex_val) else 0.0
-            fcf = float(opcf_val) - capex_abs if not pd.isna(opcf_val) else None
+            fcf = float(opcf_val) - capex_abs
+
+            q_num = (dt.month - 1) // 3 + 1
             rows.append(
                 {
                     "year": year,
-                    "operating_cf": None if pd.isna(opcf_val) else float(opcf_val),
+                    "operating_cf": float(opcf_val),
                     "capex": capex_abs if capex_val is not None else None,
                     "fcf": fcf,
+                    "quarter_label": f"{year} Q{q_num}",
+                    "is_full_year": dt.month == 12,
                 }
             )
 
@@ -770,6 +743,87 @@ class FinMindClient:
                     break
 
         return result_df, share_capital
+
+    @staticmethod
+    def _extract_cf_series(cf: pd.DataFrame) -> tuple["pd.Series | None", "pd.Series | None"]:
+        """Pull operating-CF and CapEx series (NT$元, cumulative YTD) from a cash-flow DataFrame.
+
+        FinMind relabels the same line item across years (e.g. operating CF is
+        ``CashFlowsFromOperatingActivities`` pre-2022 and
+        ``NetCashInflowFromOperatingActivities`` from 2022 on). Picking only the first
+        non-empty label silently caps history at whichever label is most recent — so
+        we merge all candidate labels into one continuous series.
+        """
+        opcf_types = [
+            "NetCashInflowFromOperatingActivities",
+            "CashFlowsFromOperatingActivities",
+            "NetCashProvidedByUsedInOperatingActivities",
+            "OperatingActivities",
+        ]
+        capex_types = [
+            "AcquisitionOfPropertyPlantAndEquipment",
+            "CashOutflowForAcquisitionOfPropertyPlantAndEquipment",
+            "PaymentsForAcquisitionOfPropertyPlantAndEquipment",
+            "PropertyAndPlantAndEquipment",
+            "PurchaseOfPropertyPlantAndEquipmentIntangibleAssetsAndOtherLongTermAssets",
+        ]
+
+        def _merge(types: list[str]) -> "pd.Series | None":
+            merged: pd.Series | None = None
+            for t in types:
+                sub = cf[cf["type"] == t].drop_duplicates(subset=["date"], keep="last")
+                if sub.empty:
+                    continue
+                s = pd.Series(sub["value"].values, index=pd.to_datetime(sub["date"]), dtype=float).sort_index()
+                merged = s if merged is None else merged.combine_first(s)
+            return merged.sort_index() if merged is not None else None
+
+        return _merge(opcf_types), _merge(capex_types)
+
+    def fetch_quarterly_fcf_data(
+        self, stock_id: str, start_date: date, end_date: date, timeout: float = 30.0
+    ) -> pd.DataFrame:
+        """Quarterly **cumulative (YTD)** Free Cash Flow = Operating CF − |CapEx|.
+
+        Taiwan cash-flow statements are reported cumulatively within each fiscal
+        year (Q1, H1, 9M, FY); each quarter's value is the year-to-date running
+        total. Surfaces every filed quarter — many more data points than the
+        annual (Q4-only) view.
+
+        Returns DataFrame with columns:
+          quarter (str date), quarter_label (e.g. '2025 Q3'),
+          operating_cf, capex, fcf  (all NT$元, cumulative within the fiscal year)
+        """
+        cols = ["quarter", "quarter_label", "operating_cf", "capex", "fcf"]
+        cf = self.fetch_cash_flows_statement(stock_id, start_date, end_date, timeout)
+        if cf.empty:
+            return pd.DataFrame(columns=cols)
+
+        opcf_series, capex_series = self._extract_cf_series(cf)
+        if opcf_series is None:
+            return pd.DataFrame(columns=cols)
+
+        quarter_dates = sorted(
+            dt for dt in opcf_series.index if not pd.isna(dt) and dt.month in {3, 6, 9, 12}
+        )
+
+        rows = []
+        for dt in quarter_dates:
+            opcf_val = opcf_series.get(dt)
+            if opcf_val is None or pd.isna(opcf_val):
+                continue
+            capex_val = capex_series.get(dt) if capex_series is not None and dt in capex_series.index else None
+            capex_abs = abs(float(capex_val)) if capex_val is not None and not pd.isna(capex_val) else 0.0
+            q_num = (dt.month - 1) // 3 + 1
+            rows.append({
+                "quarter": str(dt.date()),
+                "quarter_label": f"{dt.year} Q{q_num}",
+                "operating_cf": float(opcf_val),
+                "capex": capex_abs if capex_val is not None else None,
+                "fcf": float(opcf_val) - capex_abs,
+            })
+
+        return pd.DataFrame(rows) if rows else pd.DataFrame(columns=cols)
 
     def fetch_director_shareholding_latest(
         self, stock_id: str, timeout: float = 30.0

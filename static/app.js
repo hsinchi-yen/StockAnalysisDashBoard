@@ -175,6 +175,7 @@ const dashboardState = {
   roeRoaRows: [],
   debtRatioRows: [],
   fcfData: null,
+  fcfQuarterlyData: null,
   dcfData: null,
   shareholdingData: null,
   turnoverDaysRows: [],
@@ -1102,7 +1103,7 @@ function plotFreeCashFlow(data, stockId, years) {
     return;
   }
 
-  const labels = rows.map((r) => String(r.year));
+  const labels = rows.map((r) => r.is_full_year === false ? `${r.year}*` : String(r.year));
   const opcf = rows.map((r) => r.operating_cf !== null ? r.operating_cf / 1000 : null); // convert to 百萬
   const capex = rows.map((r) => r.capex !== null ? -r.capex / 1000 : null); // show as negative bar
   const fcf = rows.map((r) => r.fcf !== null ? r.fcf / 1000 : null);
@@ -1167,7 +1168,7 @@ function plotFreeCashFlow(data, stockId, years) {
   const avgFcf = data.fcf_avg;
   const avgPct = data.fcf_avg_pct_capital;
   const tableRows = [...rows].reverse().map((r) => [
-    String(r.year),
+    r.is_full_year === false ? `${r.quarter_label || r.year}（累計）` : String(r.year),
     formatCF(r.operating_cf),
     formatCF(r.capex),
     formatCF(r.fcf),
@@ -1186,6 +1187,64 @@ function plotFreeCashFlow(data, stockId, years) {
   renderTable(
     $("fcfTable"),
     ["年度", "營業現金流", "資本支出", "自由現金流", "佔股本 %"],
+    tableRows
+  );
+}
+
+// ── NEW: Free Cash Flow (quarterly cumulative) ───────────────────────────────
+
+function plotFreeCashFlowQuarterly(data, stockId, years) {
+  clearSkeleton("fcfQuarterlyChart");
+  const rows = (data && data.rows) || [];
+  const el = $("fcfQuarterlyChart");
+  if (!rows.length) {
+    if (el) el.textContent = "查無季累積自由現金流量資料（需要現金流量表資料）。";
+    return;
+  }
+
+  const labels = rows.map((r) => r.quarter_label);
+  const opcf = rows.map((r) => r.operating_cf !== null ? r.operating_cf / 1000 : null); // 百萬
+  const capex = rows.map((r) => r.capex !== null ? -r.capex / 1000 : null);
+  const fcf = rows.map((r) => r.fcf !== null ? r.fcf / 1000 : null);
+
+  const traces = [
+    {
+      x: labels, y: opcf, type: "bar", name: "營業現金流（累計）",
+      marker: { color: "#3b82f6", opacity: 0.75 },
+      hovertemplate: "%{x}<br>營業CF：%{y:,.1f} M<extra></extra>",
+    },
+    {
+      x: labels, y: capex, type: "bar", name: "資本支出（負）",
+      marker: { color: "#f97316", opacity: 0.75 },
+      hovertemplate: "%{x}<br>資本支出：%{y:,.1f} M<extra></extra>",
+    },
+    {
+      x: labels, y: fcf, type: "scatter", mode: "lines+markers", name: "自由現金流（累計）",
+      line: { color: "#22c55e", width: 2 },
+      marker: { color: "#22c55e", size: 6 },
+      connectgaps: false,
+      hovertemplate: "%{x}<br>自由CF：%{y:,.1f} M<extra></extra>",
+    },
+  ];
+
+  const layout = baseChartLayout(`${stockId} 自由現金流量（季累積，${years}年）`, {
+    margin: isCompactViewport() ? { l: 44, r: 20, t: 48, b: 64 } : { l: 60, r: 30, t: 50, b: 60 },
+    barmode: "group",
+    xaxis: { type: "category", tickangle: -45 },
+    yaxis: { title: "金額（百萬元）", tickformat: ",.0f", zeroline: true },
+  });
+
+  Plotly.newPlot("fcfQuarterlyChart", traces, layout, PLOTLY_CONFIG);
+
+  const tableRows = [...rows].reverse().map((r) => [
+    r.quarter_label,
+    formatCF(r.operating_cf),
+    formatCF(r.capex),
+    formatCF(r.fcf),
+  ]);
+  renderTable(
+    $("fcfQuarterlyTable"),
+    ["季度", "營業現金流（累計）", "資本支出", "自由現金流（累計）"],
     tableRows
   );
 }
@@ -2155,8 +2214,8 @@ function plotRevenueYoY(revenueRows, stockId) {
     return;
   }
   // String-based prev-year key: avoid Date/timezone arithmetic that can shift
-  // "YYYY-MM-01" by one day across the year boundary in UTC+8 hosts and then
-  // miss the prev-year lookup entirely. r.month from backend is "YYYY-MM-DD".
+  // "YYYY-MM-01" by one day across the year boundary in UTC+8 hosts.
+  // r.month from backend is "YYYY-MM-DD".
   const byMonth = new Map(revenueRows.map((r) => [r.month, r.revenue]));
   const prevYearKey = (monthStr) => {
     if (typeof monthStr !== "string" || monthStr.length < 7) return null;
@@ -2165,55 +2224,42 @@ function plotRevenueYoY(revenueRows, stockId) {
     return `${y - 1}${monthStr.slice(4)}`;
   };
 
-  // Build a fully-aligned series indexed by month (keep nulls for gaps so the
-  // x-axis is continuous and the MA trend line doesn't compress time).
-  const allX = [];
-  const yoyAligned = [];
+  // Keep only months where YoY is computable — matches the original chart's
+  // visible range; pushing the first ~12 months as null made the x-axis stretch
+  // left into empty space and looked broken.
+  const rows = [];
   for (const r of revenueRows) {
-    if (r.month === null || r.month === undefined) continue;
-    allX.push(r.month);
-    if (r.revenue === null || r.revenue === undefined) {
-      yoyAligned.push(null);
-      continue;
-    }
+    if (r.revenue === null || r.revenue === undefined || r.month === null) continue;
     const pKey = prevYearKey(r.month);
     const prevVal = pKey ? byMonth.get(pKey) : undefined;
-    if (prevVal === null || prevVal === undefined || prevVal === 0) {
-      yoyAligned.push(null);
-    } else {
-      yoyAligned.push(((r.revenue - prevVal) / Math.abs(prevVal)) * 100);
-    }
+    if (prevVal === null || prevVal === undefined || prevVal === 0) continue;
+    rows.push({ month: r.month, yoy: ((r.revenue - prevVal) / Math.abs(prevVal)) * 100 });
   }
-
-  const validCount = yoyAligned.filter((v) => v !== null).length;
-  if (validCount === 0) {
+  if (rows.length === 0) {
     if (el) el.textContent = "YoY 資料不足（需要至少 13 個月的營收資料）。";
     return;
   }
 
-  // 3-month trailing MA over yoyAligned (skips nulls inside the window)
-  const ma3 = yoyAligned.map((_, i) => {
-    const win = yoyAligned.slice(Math.max(0, i - 2), i + 1).filter((v) => v !== null);
+  const x = rows.map((r) => r.month);
+  const y = rows.map((r) => r.yoy);
+
+  // 3-month trailing MA over the YoY series — trend line is null until the window has 2+ points
+  const ma3 = y.map((_, i) => {
+    const win = y.slice(Math.max(0, i - 2), i + 1);
     if (win.length < 2) return null;
     return win.reduce((a, b) => a + b, 0) / win.length;
   });
 
   const traces = [
     {
-      x: allX,
-      y: yoyAligned,
+      x, y,
       type: "bar",
       name: "月營收 YoY (%)",
-      marker: {
-        color: yoyAligned.map((v) =>
-          v === null ? "rgba(0,0,0,0)" : v >= 0 ? "#10b981" : "#ef4444"
-        ),
-      },
+      marker: { color: y.map((v) => (v >= 0 ? "#10b981" : "#ef4444")) },
       hovertemplate: "%{x|%Y-%m}<br>YoY：%{y:.1f}%<extra></extra>",
     },
     {
-      x: allX,
-      y: ma3,
+      x, y: ma3,
       type: "scatter",
       mode: "lines+markers",
       name: "YoY 3 個月趨勢線",
@@ -2515,6 +2561,7 @@ function rerenderDashboard() {
   plotRoeRoa(dashboardState.roeRoaRows, sid);
   plotDebtRatio(dashboardState.debtRatioRows, sid);
   if (dashboardState.fcfData) plotFreeCashFlow(dashboardState.fcfData, sid, years);
+  if (dashboardState.fcfQuarterlyData) plotFreeCashFlowQuarterly(dashboardState.fcfQuarterlyData, sid, years);
   if (dashboardState.turnoverDaysRows && dashboardState.turnoverDaysRows.length > 0) plotTurnoverDays(dashboardState.turnoverDaysRows, sid);
   if (dashboardState.peRiverData) plotPERiver(dashboardState.peRiverData, sid);
   renderTrendSummary(dashboardState.revenueRows, dashboardState.priceRows, dashboardState.dividendYieldRows);
@@ -2603,6 +2650,7 @@ async function runQuery() {
   showSkeleton("buyScoreSkeleton");
   showSkeleton("debtRatioChart");
   showSkeleton("fcfChart");
+  showSkeleton("fcfQuarterlyChart");
   showSkeleton("dcfResult");
   showSkeleton("shareholdingTable");
   showSkeleton("turnoverDaysChart");
@@ -2631,6 +2679,7 @@ async function runQuery() {
   const pDcf = fetchJson(`${base}/dcf?years=${yr}&growth_rate=${g}&discount_rate=${r}&margin_of_safety=${mos}`, token);
   const pDebt = fetchJson(`${base}/debt_ratio?years=${yr}`, token);
   const pFcf = fetchJson(`${base}/free_cash_flow?years=${yr}`, token);
+  const pFcfQuarterly = fetchJson(`${base}/free_cash_flow_quarterly?years=${yr}`, token);
   const pShareholding = fetchJson(`${base}/shareholding`, token);
   const pTurnoverDays = fetchJson(`${base}/turnover_days?years=${yr}`, token);
   const pPeRiver = fetchJson(`${base}/pe_river?years=${yr}`, token);
@@ -2644,7 +2693,7 @@ async function runQuery() {
 
   const allPromises = [
     pLatest, pRevenue, pPrice, pDYield, pDivCash, pVolume, pRoeRoa, pDcf,
-    pDebt, pFcf, pShareholding, pTurnoverDays, pPeRiver,
+    pDebt, pFcf, pFcfQuarterly, pShareholding, pTurnoverDays, pPeRiver,
     pMargins, pEpsTrend, pLiquidity, pForeignHolding, pValuationExtra,
     pBuyScore,
   ];
@@ -2881,6 +2930,21 @@ async function runQuery() {
     if (el) {
       el.classList.remove("skeleton-section");
       el.textContent = "現金流量資料載入失敗: " + err.message;
+    }
+    onDone();
+  });
+
+  // FCF quarterly cumulative — slow, independent
+  pFcfQuarterly.then((data) => {
+    dashboardState.fcfQuarterlyData = data;
+    plotFreeCashFlowQuarterly(data, stockId, years);
+    onDone();
+  }).catch((err) => {
+    console.error("fcf_quarterly:", err);
+    const el = $("fcfQuarterlyChart");
+    if (el) {
+      el.classList.remove("skeleton-section");
+      el.textContent = "季累積現金流量資料載入失敗: " + err.message;
     }
     onDone();
   });

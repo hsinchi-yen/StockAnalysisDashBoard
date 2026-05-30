@@ -258,11 +258,21 @@
 
         <section class="card">
           <h2>自由現金流量（歷年）</h2>
-          <p class="chart-note">自由現金流量 = 營業活動現金流量 − 資本支出（取年度 Q4）。</p>
+          <p class="chart-note">自由現金流量 = 營業活動現金流量 − 資本支出（取年度 Q4 全年值）。標示 <code>*</code> 者為當年度尚未結算、以最新一季累計值呈現的部分年度，不納入平均計算。</p>
           <div id="fcfChart" class="chart skeleton-section"></div>
           <details>
             <summary>資料表</summary>
             <div id="fcfTable"></div>
+          </details>
+        </section>
+
+        <section class="card">
+          <h2>自由現金流量（季累積）</h2>
+          <p class="chart-note">每一季為該會計年度的累計值（Q1、上半年、前三季、全年），會在年初歸零重新累計。資料點較歷年圖更密集，依上方年份區間顯示。</p>
+          <div id="fcfQuarterlyChart" class="chart skeleton-section"></div>
+          <details>
+            <summary>資料表</summary>
+            <div id="fcfQuarterlyTable"></div>
           </details>
         </section>
 
@@ -404,6 +414,6 @@
       </footer>
     </main>
 
-    <script src="/static/app.js?v=27"></script>
+    <script src="/static/app.js?v=28"></script>
   </body>
 </html>
