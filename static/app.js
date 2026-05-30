@@ -2154,33 +2154,79 @@ function plotRevenueYoY(revenueRows, stockId) {
     if (el) el.textContent = "查無營收資料。";
     return;
   }
+  // String-based prev-year key: avoid Date/timezone arithmetic that can shift
+  // "YYYY-MM-01" by one day across the year boundary in UTC+8 hosts and then
+  // miss the prev-year lookup entirely. r.month from backend is "YYYY-MM-DD".
   const byMonth = new Map(revenueRows.map((r) => [r.month, r.revenue]));
-  const rows = [];
+  const prevYearKey = (monthStr) => {
+    if (typeof monthStr !== "string" || monthStr.length < 7) return null;
+    const y = parseInt(monthStr.slice(0, 4), 10);
+    if (!Number.isFinite(y)) return null;
+    return `${y - 1}${monthStr.slice(4)}`;
+  };
+
+  // Build a fully-aligned series indexed by month (keep nulls for gaps so the
+  // x-axis is continuous and the MA trend line doesn't compress time).
+  const allX = [];
+  const yoyAligned = [];
   for (const r of revenueRows) {
-    if (r.revenue === null || r.month === null) continue;
-    const thisMonth = new Date(r.month);
-    const prevYear = new Date(thisMonth);
-    prevYear.setFullYear(prevYear.getFullYear() - 1);
-    const prevKey = prevYear.toISOString().slice(0, 7) + "-01";
-    const prevVal = byMonth.get(prevKey);
-    if (prevVal !== null && prevVal !== undefined && prevVal !== 0) {
-      rows.push({ month: r.month, yoy: ((r.revenue - prevVal) / Math.abs(prevVal)) * 100 });
+    if (r.month === null || r.month === undefined) continue;
+    allX.push(r.month);
+    if (r.revenue === null || r.revenue === undefined) {
+      yoyAligned.push(null);
+      continue;
+    }
+    const pKey = prevYearKey(r.month);
+    const prevVal = pKey ? byMonth.get(pKey) : undefined;
+    if (prevVal === null || prevVal === undefined || prevVal === 0) {
+      yoyAligned.push(null);
+    } else {
+      yoyAligned.push(((r.revenue - prevVal) / Math.abs(prevVal)) * 100);
     }
   }
-  if (rows.length === 0) {
+
+  const validCount = yoyAligned.filter((v) => v !== null).length;
+  if (validCount === 0) {
     if (el) el.textContent = "YoY 資料不足（需要至少 13 個月的營收資料）。";
     return;
   }
-  const x = rows.map((r) => r.month);
-  const y = rows.map((r) => r.yoy);
-  const traces = [{
-    x, y, type: "bar", name: "月營收 YoY (%)",
-    marker: { color: y.map((v) => (v >= 0 ? "#10b981" : "#ef4444")) },
-    hovertemplate: "%{x|%Y-%m}<br>YoY：%{y:.1f}%<extra></extra>",
-  }];
+
+  // 3-month trailing MA over yoyAligned (skips nulls inside the window)
+  const ma3 = yoyAligned.map((_, i) => {
+    const win = yoyAligned.slice(Math.max(0, i - 2), i + 1).filter((v) => v !== null);
+    if (win.length < 2) return null;
+    return win.reduce((a, b) => a + b, 0) / win.length;
+  });
+
+  const traces = [
+    {
+      x: allX,
+      y: yoyAligned,
+      type: "bar",
+      name: "月營收 YoY (%)",
+      marker: {
+        color: yoyAligned.map((v) =>
+          v === null ? "rgba(0,0,0,0)" : v >= 0 ? "#10b981" : "#ef4444"
+        ),
+      },
+      hovertemplate: "%{x|%Y-%m}<br>YoY：%{y:.1f}%<extra></extra>",
+    },
+    {
+      x: allX,
+      y: ma3,
+      type: "scatter",
+      mode: "lines+markers",
+      name: "YoY 3 個月趨勢線",
+      line: { color: "#1f2937", width: 2, dash: "dot" },
+      marker: { size: 4, color: "#1f2937" },
+      connectgaps: false,
+      hovertemplate: "%{x|%Y-%m}<br>YoY MA3：%{y:.1f}%<extra></extra>",
+    },
+  ];
   const layout = baseChartLayout(`${stockId} 月營收 YoY 成長率`, {
     xaxis: { tickformat: "%Y-%m" },
     yaxis: { title: "YoY (%)", tickformat: ".1f", zeroline: true },
+    legend: { orientation: "h", x: 0, y: 1.12 },
   });
   Plotly.newPlot("revenueYoyChart", traces, layout, PLOTLY_CONFIG);
 }
@@ -2644,8 +2690,35 @@ async function runQuery() {
     ]);
 
     const inst = latest.institutional || [];
+    const instStatus = latest.institutional_status || (inst.length ? "fresh" : "unavailable");
+    const instAsOf = latest.institutional_as_of || null;
+    const instLag = Number(latest.institutional_lag_days || 0);
+    const noteEl = $("institutionalNote");
+    if (noteEl) {
+      let noteText = "";
+      let noteClass = "chart-note";
+      if (instStatus === "fresh" && instAsOf) {
+        noteText = `資料截至 ${instAsOf}`;
+      } else if (instStatus === "stale" && instAsOf) {
+        noteText = `資料截至 ${instAsOf}（延遲 ${instLag} 個交易日，T86 尚未更新最新交易日）`;
+        noteClass = "chart-note chart-note-warn";
+      } else if (instStatus === "unavailable") {
+        noteText = "法人資料尚未公布（TWSE T86 通常於盤後 15:30 後釋出，FinMind 同步可能再延遲數分鐘）。";
+        noteClass = "chart-note chart-note-warn";
+      }
+      if (noteText) {
+        noteEl.textContent = noteText;
+        noteEl.className = noteClass;
+        noteEl.style.display = "";
+      } else {
+        noteEl.style.display = "none";
+      }
+    }
     if (inst.length === 0) {
-      $("institutional").textContent = "查無法人買賣資訊。";
+      $("institutional").textContent =
+        instStatus === "unavailable"
+          ? "法人買賣資料尚未公布，請於盤後 16:30 後重新查詢。"
+          : "查無法人買賣資訊。";
     } else {
       renderTable(
         $("institutional"),

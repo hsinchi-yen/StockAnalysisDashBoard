@@ -124,6 +124,18 @@ h2 { margin: 0 0 12px; font-size: 18px; }
   color: var(--text-muted);
   font-size: 13px;
 }
+.chart-note-warn {
+  color: #b45309;
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+[data-theme="dark"] .chart-note-warn {
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.12);
+  border-color: rgba(251, 191, 36, 0.4);
+}
 .trend-narrative {
   margin: 0 0 12px;
   padding: 12px 14px;

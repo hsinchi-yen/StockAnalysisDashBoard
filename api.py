@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -345,16 +345,30 @@ def latest(
     if not latest_date:
         raise HTTPException(status_code=404, detail="no price date")
 
+    # Task 1.4: query a 5-trading-day window (≈ 10 calendar days) and pick the most
+    # recent date with institutional data. T86 data is published after market close
+    # (~15:30) and FinMind sync may lag a few more minutes; a single-day window
+    # routinely returned empty during that gap.
     inst_cache_key = build_cache_key("api_institutional", stock_id=sid, date=latest_date)
     cached_inst = cache.get(inst_cache_key)
 
-    if cached_inst and isinstance(cached_inst.get("rows"), list):
+    if (
+        cached_inst
+        and isinstance(cached_inst.get("rows"), list)
+        and cached_inst.get("status") in ("fresh", "stale")
+    ):
         inst_rows = cached_inst["rows"]
+        inst_as_of = cached_inst.get("as_of")
+        inst_status = cached_inst.get("status")
+        inst_lag_days = int(cached_inst.get("lag_days") or 0)
     else:
         try:
             client = FinMindClient(api_key=token_resolved)
-            d = date.fromisoformat(latest_date)
-            df_inst = client.fetch_institutional_investors_buy_sell(stock_id=sid, start_date=d, end_date=d)
+            end_d = date.fromisoformat(latest_date)
+            start_d = end_d - timedelta(days=10)
+            df_inst = client.fetch_institutional_investors_buy_sell(
+                stock_id=sid, start_date=start_d, end_date=end_d
+            )
         except FinMindError as e:
             raise HTTPException(status_code=502, detail=str(e))
 
@@ -366,9 +380,18 @@ def latest(
             "Foreign_Dealer_Self": "外資自營商",
         }
 
-        inst_rows = []
+        inst_rows: list[dict[str, Any]] = []
+        inst_as_of: str | None = None
+        inst_status = "unavailable"
+        inst_lag_days = 0
+
         if not df_inst.empty:
-            for _, r in df_inst.iterrows():
+            df_inst = df_inst.dropna(subset=["date"])
+        if not df_inst.empty:
+            most_recent = pd.Timestamp(df_inst["date"].max()).date()
+            inst_as_of = most_recent.isoformat()
+            df_latest = df_inst[pd.to_datetime(df_inst["date"]).dt.date == most_recent]
+            for _, r in df_latest.iterrows():
                 name = str(r.get("name"))
                 inst_rows.append(
                     {
@@ -378,10 +401,39 @@ def latest(
                         "net": int(r.get("net", 0) or 0),
                     }
                 )
+            if most_recent == end_d:
+                inst_status = "fresh"
+                inst_lag_days = 0
+            else:
+                inst_status = "stale"
+                # business-day delta gives a meaningful "N trading days behind"
+                inst_lag_days = int(
+                    len(pd.bdate_range(most_recent, end_d)) - 1
+                )
 
-        cache.set(inst_cache_key, {"ts": time.time(), "rows": inst_rows})
+        # Only cache results that contain data. Caching "unavailable" would trap
+        # users in the 15:30-16:30 window when T86 publishes mid-session.
+        if inst_status in ("fresh", "stale"):
+            cache.set(
+                inst_cache_key,
+                {
+                    "ts": time.time(),
+                    "rows": inst_rows,
+                    "as_of": inst_as_of,
+                    "status": inst_status,
+                    "lag_days": inst_lag_days,
+                },
+            )
 
-    return {"stock_id": sid, "stock_name": stock_name, "price": price_row, "institutional": inst_rows}
+    return {
+        "stock_id": sid,
+        "stock_name": stock_name,
+        "price": price_row,
+        "institutional": inst_rows,
+        "institutional_as_of": inst_as_of,
+        "institutional_status": inst_status,
+        "institutional_lag_days": inst_lag_days,
+    }
 
 
 @app.get("/api/stocks/{stock_id}/revenue")

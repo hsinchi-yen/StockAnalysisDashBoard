@@ -117,10 +117,30 @@
 - [ ] `/latest` 優先 TWSE，失敗自動 fallback FinMind，行為對前端透明
 - [ ] `/margin_trading` 回傳近期融資餘額、融券餘額、券資比
 - [ ] 既有 `test_api.py` 不需大改即通過（fallback 路徑可被 mock）
+- [ ] 與 Task 1.4 銜接：法人買賣超走「TWSE T86 → FinMind」雙來源，任一有資料即回傳
 
 **Verification:** `pytest -q` 全通過；斷開 TWSE 驗證 fallback
 **Files:** `api.py`, `tests/test_api.py`
 **Scope:** M
+
+#### Task 1.4 — 法人買賣超空資料修正（高優先）
+**描述:** 修正基本資訊「法人買賣」常顯示「查無法人買賣資訊」的問題。根因是 `/api/stocks/{id}/latest` 只查最新股價日當天的法人資料（`start_date == end_date == latest_date`），而 TWSE T86 法人三大買賣超盤後才釋出（約 15:30-16:30），FinMind 同步又有數分鐘延遲；在這個窗口內、或剛收盤的尷尬時段，查到的就是空陣列，且當前無 fallback 機制。
+
+**問題與修正:**
+- **Bug A — 單日窗口太窄:** 將查詢範圍改為「最新股價日往前推 5 個交易日」，取**最新有資料的那一天**回傳；同時新增 `as_of_date` 欄位告訴前端實際資料日期。
+- **Bug B — 無資料來源 fallback:** 串接 Task 1.2 的 TWSE OpenAPI T86，當 FinMind 為空時改打 TWSE；TWSE 也空才標 N/A。
+- **Bug C — 前端 UX 不夠明確:** [app.js:2647-2648](static/app.js#L2647-L2648) 直接印「查無法人買賣資訊」，使用者無法判斷是「真的沒人買賣」還是「資料還沒更新」。改為依後端回傳的 `data_status`（`fresh` / `stale_<n>d` / `unavailable`）顯示「資料截至 YYYY-MM-DD（延遲 N 日）」或「法人資料尚未公布，預計盤後 16:30 後可用」。
+
+**Acceptance criteria:**
+- [ ] `/latest` 回傳新增 `institutional_as_of` 欄位（實際資料日期，可能 ≠ 最新股價日）
+- [ ] 5 個交易日內任一天有資料即回傳；都無資料才回空 + `data_status: "unavailable"`
+- [ ] FinMind 空 → 自動 fallback TWSE OpenAPI T86；fallback 路徑可被 mock 測試
+- [ ] 快取 key 改用實際資料日期，避免「最新股價日 == 今天但法人資料是昨天」時被舊空陣列卡住
+- [ ] 前端顯示資料日期；資料延遲時加灰底提示文字而非空白訊息
+
+**Verification:** `pytest -k institutional` 新增三案例：(1) 當日有資料、(2) 當日無資料但前一日有、(3) 連續 5 日皆無；手動測試在收盤前後不同時段查 2330 / 6505 / 中小型股，驗證不會誤顯示「查無」
+**Files:** `api.py`, `datasource_finmind.py`, `static/app.js`, `static/index.html`, `tests/test_api.py`
+**Scope:** S-M
 
 #### Task 1.3 — Goodinfo 30 天長效快取 + 防擋強化
 **描述:** `datasource_goodinfo.py` 加入：(1) 月更指標 30 天 TTL 快取；(2) User-Agent 池輪替；(3) 失敗指數退避（1s→2s→4s）；(4) throttle 間隔加大並隨機化。
@@ -137,6 +157,7 @@
 #### Checkpoint A
 - [ ] `pytest -q` 全通過
 - [ ] FinMind 單次查詢呼叫數實測下降
+- [ ] 法人買賣超在收盤前後皆能顯示（即使資料延遲也標明來源日期，不再出現「查無法人買賣資訊」假象）
 - [ ] **人工確認 → Phase 2**
 
 ---

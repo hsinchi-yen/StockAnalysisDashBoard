@@ -116,6 +116,7 @@
           </section>
           <section class="card">
             <h2>法人買賣</h2>
+            <p id="institutionalNote" class="chart-note" style="display:none;"></p>
             <div id="institutional" class="skeleton-section" style="min-height:80px;"></div>
           </section>
         </section>
@@ -157,7 +158,7 @@
         <!-- 月營收 YoY 成長率 -->
         <section class="card">
           <h2>月營收 YoY 成長率 (%)</h2>
-          <p class="chart-note">與去年同月相比的成長率。綠色代表正成長，紅色代表衰退。</p>
+          <p class="chart-note">與去年同月相比的成長率。綠色代表正成長，紅色代表衰退；虛線為 3 個月移動平均，呈現整體趨勢方向。</p>
           <div id="revenueYoyChart" class="chart skeleton-section"></div>
         </section>
 
@@ -403,6 +404,6 @@
       </footer>
     </main>
 
-    <script src="/static/app.js?v=24"></script>
+    <script src="/static/app.js?v=27"></script>
   </body>
 </html>

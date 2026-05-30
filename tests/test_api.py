@@ -119,6 +119,9 @@ def test_latest_and_revenue_mocked(monkeypatch, tmp_path) -> None:
     assert payload["stock_name"] == "台積電"
     assert payload["price"]["date"] == "2026-03-17"
     assert len(payload["institutional"]) == 2
+    assert payload["institutional_as_of"] == "2026-03-17"
+    assert payload["institutional_status"] == "fresh"
+    assert payload["institutional_lag_days"] == 0
 
     r2 = client.get("/api/stocks/2330/revenue?years=3")
     assert r2.status_code == 200
@@ -154,6 +157,150 @@ def test_latest_and_revenue_mocked(monkeypatch, tmp_path) -> None:
         (row.get("date") == "2026-03-17" and row.get("volume") == 34567 and row.get("turnover") == 987)
         for row in payload6["rows"]
     )
+
+
+def _install_minimal_latest_mocks(monkeypatch, *, latest_price_date: str = "2026-03-17") -> None:
+    """Minimal mocks so /api/stocks/{id}/latest can run for institutional tests."""
+
+    def fake_fetch_stock_price(self: FinMindClient, stock_id: str, start_date: date, end_date: date, timeout: float = 30.0) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "date": latest_price_date,
+                    "open": 100.0,
+                    "max": 110.0,
+                    "min": 95.0,
+                    "close": 105.0,
+                    "spread": 2.0,
+                    "Trading_Volume": 34567,
+                    "Trading_money": 2222222,
+                    "Trading_turnover": 987,
+                }
+            ]
+        )
+
+    def fake_fetch_stock_name(self: FinMindClient, stock_id: str, timeout: float = 20.0) -> str | None:
+        return None
+
+    monkeypatch.setattr(FinMindClient, "fetch_stock_price", fake_fetch_stock_price)
+    monkeypatch.setattr(FinMindClient, "fetch_stock_name", fake_fetch_stock_name)
+
+
+def test_institutional_fresh_on_latest_day(monkeypatch, tmp_path) -> None:
+    """T86 已釋出當日資料 — 應為 fresh、lag = 0、回傳該日 rows。"""
+
+    api.cache = CacheStore(base_dir=tmp_path)
+    monkeypatch.setenv("FINMIND_API_KEY", "tok")
+
+    class FixedDate(date):
+        @classmethod
+        def today(cls) -> date:  # type: ignore[override]
+            return cls(2026, 3, 17)
+
+    monkeypatch.setattr(api, "date", FixedDate)
+    _install_minimal_latest_mocks(monkeypatch)
+
+    received_window: dict[str, date] = {}
+
+    def fake_fetch_inst(self: FinMindClient, stock_id: str, start_date: date, end_date: date, timeout: float = 30.0) -> pd.DataFrame:
+        received_window["start"] = start_date
+        received_window["end"] = end_date
+        return pd.DataFrame(
+            [
+                {"date": pd.Timestamp("2026-03-13"), "name": "Foreign_Investor", "buy": 1, "sell": 0, "net": 1},
+                {"date": pd.Timestamp("2026-03-17"), "name": "Foreign_Investor", "buy": 10, "sell": 7, "net": 3},
+                {"date": pd.Timestamp("2026-03-17"), "name": "Investment_Trust", "buy": 5, "sell": 9, "net": -4},
+            ]
+        )
+
+    monkeypatch.setattr(FinMindClient, "fetch_institutional_investors_buy_sell", fake_fetch_inst)
+
+    r = TestClient(api.app).get("/api/stocks/2330/latest")
+    assert r.status_code == 200
+    payload = r.json()
+
+    # window: 5+ trading days back from latest_date
+    assert received_window["end"] == date(2026, 3, 17)
+    assert (received_window["end"] - received_window["start"]).days >= 7
+
+    assert payload["institutional_status"] == "fresh"
+    assert payload["institutional_as_of"] == "2026-03-17"
+    assert payload["institutional_lag_days"] == 0
+    cats = {row["category"] for row in payload["institutional"]}
+    assert cats == {"外資", "投信"}  # only 2026-03-17 rows
+
+
+def test_institutional_stale_falls_back_to_previous_day(monkeypatch, tmp_path) -> None:
+    """T86 當日尚未公布，但前一交易日有資料 — 應為 stale、回傳前一日資料。"""
+
+    api.cache = CacheStore(base_dir=tmp_path)
+    monkeypatch.setenv("FINMIND_API_KEY", "tok")
+
+    class FixedDate(date):
+        @classmethod
+        def today(cls) -> date:  # type: ignore[override]
+            return cls(2026, 3, 17)
+
+    monkeypatch.setattr(api, "date", FixedDate)
+    _install_minimal_latest_mocks(monkeypatch)
+
+    def fake_fetch_inst(self: FinMindClient, stock_id: str, start_date: date, end_date: date, timeout: float = 30.0) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {"date": pd.Timestamp("2026-03-13"), "name": "Foreign_Investor", "buy": 2, "sell": 1, "net": 1},
+                {"date": pd.Timestamp("2026-03-16"), "name": "Foreign_Investor", "buy": 8, "sell": 5, "net": 3},
+            ]
+        )
+
+    monkeypatch.setattr(FinMindClient, "fetch_institutional_investors_buy_sell", fake_fetch_inst)
+
+    r = TestClient(api.app).get("/api/stocks/2330/latest")
+    assert r.status_code == 200
+    payload = r.json()
+
+    assert payload["institutional_status"] == "stale"
+    assert payload["institutional_as_of"] == "2026-03-16"
+    assert payload["institutional_lag_days"] == 1
+    assert len(payload["institutional"]) == 1
+    assert payload["institutional"][0]["category"] == "外資"
+
+
+def test_institutional_unavailable_no_data_in_window(monkeypatch, tmp_path) -> None:
+    """5 個交易日內皆無資料 — 應為 unavailable，且不快取（下一次仍重新呼叫）。"""
+
+    api.cache = CacheStore(base_dir=tmp_path)
+    monkeypatch.setenv("FINMIND_API_KEY", "tok")
+
+    class FixedDate(date):
+        @classmethod
+        def today(cls) -> date:  # type: ignore[override]
+            return cls(2026, 3, 17)
+
+    monkeypatch.setattr(api, "date", FixedDate)
+    _install_minimal_latest_mocks(monkeypatch)
+
+    call_count = {"n": 0}
+
+    def fake_fetch_inst(self: FinMindClient, stock_id: str, start_date: date, end_date: date, timeout: float = 30.0) -> pd.DataFrame:
+        call_count["n"] += 1
+        return pd.DataFrame(columns=["date", "name", "buy", "sell", "net"])
+
+    monkeypatch.setattr(FinMindClient, "fetch_institutional_investors_buy_sell", fake_fetch_inst)
+
+    tc = TestClient(api.app)
+    r1 = tc.get("/api/stocks/2330/latest")
+    assert r1.status_code == 200
+    payload1 = r1.json()
+    assert payload1["institutional"] == []
+    assert payload1["institutional_status"] == "unavailable"
+    assert payload1["institutional_as_of"] is None
+    assert payload1["institutional_lag_days"] == 0
+
+    # second call must re-fetch (unavailable is never cached) so the user can
+    # retry after T86 publishes later in the day
+    r2 = tc.get("/api/stocks/2330/latest")
+    assert r2.status_code == 200
+    assert call_count["n"] == 2
 
 
 def test_token_usage_returns_remaining(monkeypatch) -> None:
