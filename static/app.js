@@ -2289,8 +2289,8 @@ function plotRevenueYoY(revenueRows, stockId) {
       type: "scatter",
       mode: "lines+markers",
       name: "YoY 3 個月趨勢線",
-      line: { color: "#1f2937", width: 2, dash: "dot" },
-      marker: { size: 4, color: "#1f2937" },
+      line: { color: isDarkMode() ? "#e2e8f0" : "#1f2937", width: 2, dash: "dot" },
+      marker: { size: 4, color: isDarkMode() ? "#e2e8f0" : "#1f2937" },
       connectgaps: false,
       hovertemplate: "%{x|%Y-%m}<br>YoY MA3：%{y:.1f}%<extra></extra>",
     },
@@ -2814,6 +2814,7 @@ async function runQuery() {
     dashboardState.stockId = stockId;
     dashboardState.revenueRows = rows;
     plotRevenue(rows, stockId);
+    plotRevenueYoY(rows, stockId);
     renderTable(
       $("revenueTable"),
       ["月份", "營收", "MA3", "MA6", "MA12"],
