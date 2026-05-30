@@ -53,10 +53,7 @@
             </div>
           </div>
           <div class="token-actions" style="grid-column:1/-1;">
-            <label class="paid-api-label" title="付費方案（SponsorYear 等）每小時 6000 次；免費方案每日 600 次。開啟後隱藏配額警告，不限制操作。">
-              <input id="paidApiToggle" type="checkbox" />
-              付費 API
-            </label>
+            <span id="apiPlanBadge" class="api-plan-badge" title="查剩餘次數後自動偵測方案類型"></span>
             <button id="tokenClear" type="button" class="btn-secondary">清除 Key</button>
             <button id="tokenSave"  type="button" class="btn-secondary">儲存 Key</button>
             <button id="tokenUsage" type="button" class="btn-secondary">查剩餘次數</button>
@@ -418,6 +415,6 @@
       </footer>
     </main>
 
-    <script src="/static/app.js?v=30"></script>
+    <script src="/static/app.js?v=31"></script>
   </body>
 </html>

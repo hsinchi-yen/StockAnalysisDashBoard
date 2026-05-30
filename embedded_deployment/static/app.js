@@ -320,20 +320,15 @@ function requireTokenBeforeQuery() {
 }
 
 function bindPaidApiToggle() {
-  const toggle = $("paidApiToggle");
-  const label = toggle && toggle.closest("label");
-  if (!toggle) return;
-
-  // Restore saved state
-  const saved = localStorage.getItem(PAID_API_STORAGE_KEY) === "1";
-  toggle.checked = saved;
-  if (label) label.classList.toggle("is-paid", saved);
-
-  toggle.addEventListener("change", () => {
-    const isPaid = toggle.checked;
-    localStorage.setItem(PAID_API_STORAGE_KEY, isPaid ? "1" : "0");
-    if (label) label.classList.toggle("is-paid", isPaid);
-  });
+  // Plan badge is auto-detected from api_request_limit when updateTokenUsage() runs.
+  // Restore badge from last known state so it shows on page load before next quota check.
+  const badge = $("apiPlanBadge");
+  if (!badge) return;
+  const isPaid = localStorage.getItem(PAID_API_STORAGE_KEY) === "1";
+  if (isPaid) {
+    badge.textContent = "SponsorYear";
+    badge.className = "api-plan-badge paid";
+  }
 }
 
 function bindTokenSettings() {
@@ -391,9 +386,20 @@ async function updateTokenUsage(token) {
     const rem = Number.isFinite(remNum) && remNum >= 0 ? remNum : Math.max(0, limit - used);
     const pct = limit > 0 ? (rem / limit) * 100 : 0;
 
-    // Paid plan: 6000/hr — warn at 10% remaining; Free plan: 600/day — warn at 50 absolute
-    const isPaid = localStorage.getItem(PAID_API_STORAGE_KEY) === "1";
-    let color = "#10b981"; // green
+    // Auto-detect plan: limit >= 1600 = paid (SponsorYear 6000/hr), else free (600/day)
+    const isPaid = limit >= 1600;
+    // Persist detected plan so fetchJson error messages are consistent
+    localStorage.setItem(PAID_API_STORAGE_KEY, isPaid ? "1" : "0");
+
+    // Update badge
+    const badge = $("apiPlanBadge");
+    if (badge) {
+      badge.textContent = isPaid ? "SponsorYear" : "免費";
+      badge.className = "api-plan-badge " + (isPaid ? "paid" : "free");
+    }
+
+    // Warn thresholds: paid → % based (5%/10%); free → absolute (20/50)
+    let color = "#10b981";
     if (isPaid) {
       if (pct < 5) color = "#ef4444";
       else if (pct < 10) color = "#f59e0b";
@@ -401,17 +407,17 @@ async function updateTokenUsage(token) {
       if (rem < 20) color = "#ef4444";
       else if (rem < 50) color = "#f59e0b";
     }
-    
+
     const container = $("tokenUsageContainer");
     const bar = $("tokenUsageBar");
     const text = $("tokenUsageText");
-    
+
     if (container && bar && text) {
       container.style.display = "block";
       bar.style.width = `${pct}%`;
       bar.style.backgroundColor = color;
-      const isPaidLabel = isPaid ? "（每小時）" : "（每日）";
-      text.textContent = `已使用 ${used} 次｜剩餘 ${rem} 次 / ${limit} 次 (${pct.toFixed(1)}%)${isPaidLabel}`;
+      const cycle = isPaid ? "每小時" : "每日";
+      text.textContent = `已使用 ${used} 次｜剩餘 ${rem} 次 / ${limit} 次 (${pct.toFixed(1)}%)（${cycle}）`;
     }
   } catch (e) {
     const container = $("tokenUsageContainer");
