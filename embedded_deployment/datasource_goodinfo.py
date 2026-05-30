@@ -15,7 +15,7 @@ import random
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 import pandas as pd
 import requests
@@ -23,6 +23,32 @@ import requests
 GOODINFO_FIN_URL = "https://goodinfo.tw/tw/StockFinDetail.asp"
 GOODINFO_SHAREHOLD_URL = "https://goodinfo.tw/tw/StockDirectorSharehold.asp"
 logger = logging.getLogger(__name__)
+
+_UA_POOL: list[str] = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 Edg/123.0.0.0",
+]
+
+_GOODINFO_CACHE: dict[str, tuple[float, Any]] = {}
+_CACHE_TTL_30D = 30 * 24 * 3600
+
+
+def _gc_get(key: str) -> Any:
+    entry = _GOODINFO_CACHE.get(key)
+    if entry is None:
+        return None
+    ts, val = entry
+    if time.time() - ts > _CACHE_TTL_30D:
+        del _GOODINFO_CACHE[key]
+        return None
+    return val
+
+
+def _gc_set(key: str, val: Any) -> None:
+    _GOODINFO_CACHE[key] = (time.time(), val)
 
 
 class GoodinfoError(RuntimeError):
@@ -114,11 +140,7 @@ class GoodinfoClient:
     def __post_init__(self) -> None:
         self._session.headers.update(
             {
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/122.0.0.0 Safari/537.36"
-                ),
+                "User-Agent": random.choice(_UA_POOL),
                 "Accept": (
                     "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
                 ),
@@ -155,42 +177,32 @@ class GoodinfoClient:
         return cookie_val, excel_days
 
     def _fetch_html(self, stock_id: str, rpt_cat: str, timeout: float = 30.0) -> str:
-        """Fetch financial HTML, retrying transient failures and unsolved challenges.
-
-        Goodinfo intermittently returns HTTP 5xx or re-serves the JS-challenge page
-        (no real tables) even after the cookie is set. Retry with backoff so a single
-        flaky response does not surface as a hard ROE/ROA failure.
-        """
-        attempts = 3
-        last_exc: Exception | None = None
-        for attempt in range(attempts):
-            try:
-                html = self._fetch_html_once(stock_id, rpt_cat, timeout)
-            except requests.RequestException as exc:
-                last_exc = exc
-                logger.debug("Goodinfo: HTTP error for %s/%s (attempt %d): %s", stock_id, rpt_cat, attempt + 1, exc)
-            else:
-                # A real financial page is large and contains <table> markup.
-                # A still-challenged / error page is tiny — retry it.
-                if len(html) >= 5000 and "<table" in html.lower():
-                    return html
-                last_exc = GoodinfoError(f"Goodinfo returned an unusable page ({len(html)} chars).")
-                logger.debug("Goodinfo: unusable page for %s/%s (attempt %d, %d chars)", stock_id, rpt_cat, attempt + 1, len(html))
-            if attempt < attempts - 1:
-                time.sleep(self.throttle_seconds * (attempt + 1) + random.uniform(0.0, 0.5))
-
-        if isinstance(last_exc, GoodinfoError):
-            raise last_exc
-        raise GoodinfoError(f"Goodinfo fetch failed after {attempts} attempts: {last_exc}")
-
-    def _fetch_html_once(self, stock_id: str, rpt_cat: str, timeout: float = 30.0) -> str:
-        jitter = random.uniform(0.0, 0.4)
-        time.sleep(self.throttle_seconds + jitter)
+        max_retries = 3
+        delay = 1.0
         params = {"RPT_CAT": rpt_cat, "STOCK_ID": str(stock_id).strip()}
-        r = self._session.get(GOODINFO_FIN_URL, params=params, timeout=timeout)
-        r.raise_for_status()
-        r.encoding = "utf-8"
-        html = r.text
+        last_exc: Exception = GoodinfoError("no attempt made")
+        for attempt in range(max_retries):
+            self._session.headers["User-Agent"] = random.choice(_UA_POOL)
+            jitter = random.uniform(0.0, 0.5)
+            time.sleep(self.throttle_seconds + jitter)
+            try:
+                r = self._session.get(GOODINFO_FIN_URL, params=params, timeout=timeout)
+            except Exception as exc:
+                last_exc = exc
+                time.sleep(delay + random.uniform(0.0, 0.5))
+                delay *= 2
+                continue
+            if r.status_code in (429, 403):
+                last_exc = GoodinfoError(f"HTTP {r.status_code}")
+                time.sleep(delay + random.uniform(0.0, 0.5))
+                delay *= 2
+                continue
+            r.raise_for_status()
+            r.encoding = "utf-8"
+            html = r.text
+            break
+        else:
+            raise last_exc
 
         # Detect Goodinfo JS challenge (tiny page with setCookie + redirect)
         if len(html) < 5000 and "CLIENT_KEY" in html:
@@ -310,9 +322,15 @@ class GoodinfoClient:
         IMPORTANT: Values are YTD-cumulative within each fiscal year.
         Call ``_deaccumulate_income()`` (in api.py) to convert to single-quarter.
         """
+        cache_key = f"goodinfo_ni_acc|{stock_id}"
+        cached = _gc_get(cache_key)
+        if cached is not None:
+            return pd.Series(cached, dtype=float)
         html = self._fetch_html(stock_id, "IS_M_QUAR_ACC")
         tbl  = self._find_financial_table(html)
-        return self._extract_row(tbl, ["稅後淨利", "本期淨利", "稅後純益"])
+        result = self._extract_row(tbl, ["稅後淨利", "本期淨利", "稅後純益"])
+        _gc_set(cache_key, {str(k): v for k, v in result.items()})
+        return result
 
     def fetch_quarterly_balance(
         self, stock_id: str
@@ -322,6 +340,12 @@ class GoodinfoClient:
         Both series are point-in-time snapshots (no de-accumulation needed).
         Returns: (equity_series, assets_series)
         """
+        cache_key = f"goodinfo_bs_quar|{stock_id}"
+        cached = _gc_get(cache_key)
+        if cached is not None:
+            eq = pd.Series({pd.Timestamp(k): v for k, v in cached["equity"].items()}, dtype=float)
+            as_ = pd.Series({pd.Timestamp(k): v for k, v in cached["assets"].items()}, dtype=float)
+            return eq, as_
         html   = self._fetch_html(stock_id, "BS_M_QUAR")
         tbl    = self._find_financial_table(html)
         # Use specific labels to avoid hitting sub-totals (e.g. "其他權益合計"
@@ -330,6 +354,10 @@ class GoodinfoClient:
             tbl, ["歸屬於母公司業主之權益合計", "股東權益總額", "股東權益合計"]
         )
         assets = self._extract_row(tbl, ["資產總額", "資產總計"])
+        _gc_set(cache_key, {
+            "equity": {str(k): v for k, v in equity.items()},
+            "assets": {str(k): v for k, v in assets.items()},
+        })
         return equity, assets
 
     # ------------------------------------------------------------------
@@ -340,12 +368,30 @@ class GoodinfoClient:
         """Fetch the Goodinfo shareholding page HTML, handling JS cookie challenge."""
         import datetime as _dt
 
-        jitter = random.uniform(0.0, 0.4)
-        time.sleep(self.throttle_seconds + jitter)
-
+        max_retries = 3
+        delay = 1.0
         params = {"STOCK_ID": str(stock_id).strip()}
-        r = self._session.get(GOODINFO_SHAREHOLD_URL, params=params, timeout=timeout)
-        r.raise_for_status()
+        last_exc: Exception = GoodinfoError("no attempt made")
+        for attempt in range(max_retries):
+            self._session.headers["User-Agent"] = random.choice(_UA_POOL)
+            jitter = random.uniform(0.0, 0.5)
+            time.sleep(self.throttle_seconds + jitter)
+            try:
+                r = self._session.get(GOODINFO_SHAREHOLD_URL, params=params, timeout=timeout)
+            except Exception as exc:
+                last_exc = exc
+                time.sleep(delay + random.uniform(0.0, 0.5))
+                delay *= 2
+                continue
+            if r.status_code in (429, 403):
+                last_exc = GoodinfoError(f"HTTP {r.status_code}")
+                time.sleep(delay + random.uniform(0.0, 0.5))
+                delay *= 2
+                continue
+            r.raise_for_status()
+            break
+        else:
+            raise last_exc
         r.encoding = "utf-8"
         html = r.text
 
@@ -411,6 +457,17 @@ class GoodinfoClient:
         Ratio columns are in percent (%).
         Returns empty DataFrame on failure.
         """
+        cache_key = f"goodinfo_sharehold|{stock_id}"
+        cached_records = _gc_get(cache_key)
+        if cached_records is not None:
+            try:
+                df = pd.DataFrame(cached_records)
+                if not df.empty:
+                    df["date"] = pd.to_datetime(df["date"])
+                    return df
+            except Exception:
+                pass
+
         try:
             html = self._fetch_sharehold_html(stock_id=stock_id, timeout=timeout)
         except Exception as exc:
@@ -469,16 +526,23 @@ class GoodinfoClient:
                 if n_date_rows > 5:
                     transposed_candidates.append((n_date_rows, tbl))
 
+        result_df: pd.DataFrame = pd.DataFrame()
         if best_count < 3 and transposed_candidates:
-            # Use the transposed orientation
             transposed_candidates.sort(reverse=True, key=lambda x: x[0])
             raw_tbl = transposed_candidates[0][1]
-            return self._parse_sharehold_row_oriented(raw_tbl)
+            result_df = self._parse_sharehold_row_oriented(raw_tbl)
         elif best_tbl is not None and best_count >= 3:
-            return self._parse_sharehold_col_oriented(best_tbl)
+            result_df = self._parse_sharehold_col_oriented(best_tbl)
+        else:
+            logger.warning("Goodinfo sharehold: no parseable table for %s", stock_id)
+            return pd.DataFrame()
 
-        logger.warning("Goodinfo sharehold: no parseable table for %s", stock_id)
-        return pd.DataFrame()
+        if not result_df.empty:
+            try:
+                _gc_set(cache_key, result_df.assign(date=result_df["date"].astype(str)).to_dict("records"))
+            except Exception:
+                pass
+        return result_df
 
     # ── internal parsers ──────────────────────────────────────────────────
 
