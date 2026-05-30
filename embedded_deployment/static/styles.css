@@ -183,6 +183,21 @@ h2 { margin: 0 0 12px; font-size: 18px; }
   flex-wrap: wrap;
   margin-top: 4px;
 }
+.paid-api-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-muted);
+}
+.paid-api-label input[type="checkbox"] { width: 15px; height: 15px; cursor: pointer; accent-color: #10b981; }
+.paid-api-label.is-paid { border-color: #10b981; color: #10b981; background: rgba(16,185,129,0.08); }
 label {
   display: grid;
   gap: 6px;

@@ -2751,6 +2751,13 @@ def buy_score(
         "risk_criteria": risk_criteria,
         "risk_score": risk_score,
     }
-    cache.set(cache_key, {"ts": time.time(), **payload})
+    # Only cache results where data was actually fetched. If all/most fetches
+    # failed (quota exceeded, network error, etc.) the criteria will be mostly
+    # null. Caching that failure traps the user all day — the next query would
+    # silently return yesterday's stale 402 errors without retrying the API.
+    # Threshold: at least one criterion must have a non-null pass value.
+    has_real_data = any(c.get("pass") is not None for c in criteria)
+    if has_real_data:
+        cache.set(cache_key, {"ts": time.time(), **payload})
     return payload
 

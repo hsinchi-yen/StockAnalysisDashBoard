@@ -124,7 +124,10 @@ async function fetchJson(url, token) {
       if (detail.includes("timeout") || detail.includes("Read timed out")) {
         detail = "連線 FinMind 或 Goodinfo 時發生逾時。這通常是因為查詢區間較長或平台負載較高，請稍後再試。";
       } else if (detail.includes("quota exceeded") || detail.includes("402")) {
-        detail = "FinMind API 呼叫次數已達上限。請等待免費額度重置後再查詢。";
+        const isPaid = localStorage.getItem(PAID_API_STORAGE_KEY) === "1";
+        detail = isPaid
+          ? "FinMind API 呼叫次數已達本小時上限（6000 次），請稍後再試。"
+          : "FinMind API 呼叫次數已達上限。請等待免費額度重置（每日 UTC 00:00）後再查詢。";
       } else {
         detail = "第三方資料平台暫時無回應或發生錯誤 (" + detail + ")";
       }
@@ -192,6 +195,7 @@ const dashboardState = {
 // DCF parameter state (preserved across re-queries)
 const dcfState = { g: 0.04, r: 0.08, mos: 0.30 };
 const FINMIND_TOKEN_STORAGE_KEY = "microeco.finmind_api_key";
+const PAID_API_STORAGE_KEY = "microeco.paid_api";
 
 let resizeTimer = null;
 
@@ -315,6 +319,23 @@ function requireTokenBeforeQuery() {
   return "";
 }
 
+function bindPaidApiToggle() {
+  const toggle = $("paidApiToggle");
+  const label = toggle && toggle.closest("label");
+  if (!toggle) return;
+
+  // Restore saved state
+  const saved = localStorage.getItem(PAID_API_STORAGE_KEY) === "1";
+  toggle.checked = saved;
+  if (label) label.classList.toggle("is-paid", saved);
+
+  toggle.addEventListener("change", () => {
+    const isPaid = toggle.checked;
+    localStorage.setItem(PAID_API_STORAGE_KEY, isPaid ? "1" : "0");
+    if (label) label.classList.toggle("is-paid", isPaid);
+  });
+}
+
 function bindTokenSettings() {
   const tokenInput = $("token");
   const saveBtn = $("tokenSave");
@@ -369,12 +390,16 @@ async function updateTokenUsage(token) {
     const limit = Number.isFinite(limitNum) && limitNum > 0 ? limitNum : 600;
     const rem = Number.isFinite(remNum) && remNum >= 0 ? remNum : Math.max(0, limit - used);
     const pct = limit > 0 ? (rem / limit) * 100 : 0;
-    
-    let color = "#10b981"; // emerald-500 (Green) >= 50
-    if (rem < 20) {
-      color = "#ef4444"; // red-500 (Red) < 20
-    } else if (rem < 50) {
-      color = "#f59e0b"; // amber-500 (Yellow) < 50
+
+    // Paid plan: 6000/hr — warn at 10% remaining; Free plan: 600/day — warn at 50 absolute
+    const isPaid = localStorage.getItem(PAID_API_STORAGE_KEY) === "1";
+    let color = "#10b981"; // green
+    if (isPaid) {
+      if (pct < 5) color = "#ef4444";
+      else if (pct < 10) color = "#f59e0b";
+    } else {
+      if (rem < 20) color = "#ef4444";
+      else if (rem < 50) color = "#f59e0b";
     }
     
     const container = $("tokenUsageContainer");
@@ -385,7 +410,8 @@ async function updateTokenUsage(token) {
       container.style.display = "block";
       bar.style.width = `${pct}%`;
       bar.style.backgroundColor = color;
-      text.textContent = `已使用 ${used} 次｜剩餘 ${rem} 次 / ${limit} 次 (${pct.toFixed(1)}%)`;
+      const isPaidLabel = isPaid ? "（每小時）" : "（每日）";
+      text.textContent = `已使用 ${used} 次｜剩餘 ${rem} 次 / ${limit} 次 (${pct.toFixed(1)}%)${isPaidLabel}`;
     }
   } catch (e) {
     const container = $("tokenUsageContainer");
@@ -3084,6 +3110,7 @@ window.addEventListener("resize", () => {
 // Hook DCF recalculate button
 hookDcfRecalc();
 bindTokenSettings();
+bindPaidApiToggle();
 initTabs();
 initTheme();
 initQuickActions();
