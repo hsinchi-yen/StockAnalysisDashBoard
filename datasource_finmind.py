@@ -89,10 +89,25 @@ class FinMindClient:
         if df.empty:
             return pd.DataFrame(columns=["month", "revenue"])
 
-        # FinMind date is YYYY-MM-DD; normalize to month start
-        df["month"] = pd.to_datetime(df["date"]).dt.to_period("M").dt.to_timestamp(how="start")
+        # IMPORTANT: FinMind's `date` field for TaiwanStockMonthRevenue is the
+        # *announcement* date (≈ the 10th of the month AFTER the revenue period),
+        # not the revenue month itself. Deriving the month from `date` shifts
+        # every figure forward by one month (e.g. May revenue announced Jun 10
+        # would be mislabeled as June). The dataset carries the true period in
+        # `revenue_year` / `revenue_month`, so use those when present.
+        if "revenue_year" in df.columns and "revenue_month" in df.columns:
+            ry = pd.to_numeric(df["revenue_year"], errors="coerce")
+            rm = pd.to_numeric(df["revenue_month"], errors="coerce")
+            month = pd.to_datetime(
+                {"year": ry, "month": rm, "day": 1}, errors="coerce"
+            )
+            # Fall back to date-derived month only for rows missing the period fields.
+            fallback = pd.to_datetime(df["date"], errors="coerce").dt.to_period("M").dt.to_timestamp(how="start")
+            df["month"] = month.fillna(fallback)
+        else:
+            df["month"] = pd.to_datetime(df["date"]).dt.to_period("M").dt.to_timestamp(how="start")
         df["revenue"] = pd.to_numeric(df.get("revenue"), errors="coerce")
-        df = df[["month", "revenue"]].drop_duplicates(subset=["month"], keep="last").sort_values("month")
+        df = df[["month", "revenue"]].dropna(subset=["month"]).drop_duplicates(subset=["month"], keep="last").sort_values("month")
         return df
 
     def fetch_stock_price(self, stock_id: str, start_date: date, end_date: date, timeout: float = 30.0) -> pd.DataFrame:

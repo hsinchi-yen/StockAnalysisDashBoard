@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>台股分析儀表板（FinMind）</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=32" />
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
   </head>
   <body>
@@ -30,15 +30,20 @@
         <form id="queryForm" class="form">
           <label>
             股票代號
-            <input id="stockId" name="stockId" value="2330" autocomplete="off" />
+            <input id="stockId" name="stockId" value="" autocomplete="off" placeholder="例如 2330" />
           </label>
           <label>
             歷史年限
             <select id="years" name="years">
               <option value="1">1 年</option>
+              <option value="2">2 年</option>
               <option value="3" selected>3 年</option>
+              <option value="4">4 年</option>
               <option value="5">5 年</option>
+              <option value="6">6 年</option>
+              <option value="7">7 年</option>
               <option value="8">8 年</option>
+              <option value="9">9 年</option>
               <option value="10">10 年</option>
             </select>
           </label>
@@ -129,9 +134,16 @@
           <div id="foreignHoldingChart" class="chart skeleton-section"></div>
         </section>
 
+        <!-- 股東持股結構分佈（集保股權分散，逐週） -->
+        <section class="card">
+          <h2>股東持股結構分佈</h2>
+          <p class="chart-note">集保戶股權分散表（資料來源：FinMind，<strong>逐週</strong>更新）。依持股張數分為 15 個級距，第 1 級為小額散戶、第 15 級為持股逾百萬股的大戶。最近一週以圓餅圖顯示各級距占比，可拖動時間軸觀察歷史變化。</p>
+          <div id="shareholdingSpreadPanel" class="skeleton-section" style="min-height:80px;"></div>
+        </section>
+
         <!-- 董監事持股 -->
         <section class="card">
-          <h2>董監事持股資訊</h2>
+          <h2>董監事 / 外資持股趨勢</h2>
           <p class="chart-note">資料來源：Goodinfo.tw（月度歷史趨勢）。</p>
           <div id="shareholdingTable" class="skeleton-section" style="min-height:80px;"></div>
         </section>
@@ -415,6 +427,6 @@
       </footer>
     </main>
 
-    <script src="/static/app.js?v=31"></script>
+    <script src="/static/app.js?v=32"></script>
   </body>
 </html>

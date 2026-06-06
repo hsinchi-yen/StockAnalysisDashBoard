@@ -757,3 +757,282 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
   padding: 0;
 }
 [data-theme="dark"] .risk-badge-link { color: #fca5a5; }
+
+/* ════════════════════════════════════════════════════════════════════════
+   2026 Metallic / Frosted-Glass Visual Layer
+   A purely presentational refresh layered on top of the structural styles
+   above. Adds brushed-metal surfaces, frosted-glass cards, glossy controls
+   and an accent system for both Daylight and Dark themes. Structure, layout
+   and behaviour are unchanged.
+════════════════════════════════════════════════════════════════════════ */
+:root {
+  /* Accent (Apple system blue family) */
+  --accent:        #0a84ff;
+  --accent-strong: #0066d6;
+  --accent-soft:   rgba(10, 132, 255, 0.14);
+  --ring:          rgba(10, 132, 255, 0.35);
+
+  /* Ambient page background — soft daylight metal */
+  --app-bg: radial-gradient(1200px 800px at 12% -10%, #ffffff 0%, rgba(255,255,255,0) 55%),
+            radial-gradient(1000px 700px at 110% 0%, #e8eef6 0%, rgba(232,238,246,0) 50%),
+            linear-gradient(180deg, #eef1f6 0%, #e4e9f0 100%);
+
+  /* Frosted glass card */
+  --glass-bg:      rgba(255, 255, 255, 0.66);
+  --glass-bg-2:    rgba(255, 255, 255, 0.78);
+  --glass-border:  rgba(255, 255, 255, 0.75);
+  --glass-edge:    rgba(17, 24, 39, 0.08);
+  --glass-blur:    18px;
+  --elev-1: 0 1px 1px rgba(17,24,39,0.04), 0 6px 16px rgba(17,24,39,0.06);
+  --elev-2: 0 1px 1px rgba(17,24,39,0.05), 0 12px 30px rgba(17,24,39,0.10);
+
+  /* Brushed-metal neutral control */
+  --metal:        linear-gradient(180deg, #ffffff 0%, #eef1f5 48%, #e6eaf0 100%);
+  --metal-hover:  linear-gradient(180deg, #ffffff 0%, #f3f5f9 48%, #eaeef3 100%);
+  --metal-border: rgba(17, 24, 39, 0.16);
+  --metal-inset:  inset 0 1px 0 rgba(255,255,255,0.9), inset 0 -1px 0 rgba(17,24,39,0.04);
+
+  /* Glossy primary control */
+  --primary:       linear-gradient(180deg, #2b97ff 0%, #0a84ff 52%, #0a78ec 100%);
+  --primary-hover: linear-gradient(180deg, #3aa0ff 0%, #1b8bff 52%, #0a80f2 100%);
+  --primary-shadow: 0 1px 0 rgba(255,255,255,0.4) inset, 0 6px 16px rgba(10,132,255,0.32);
+
+  --radius: 16px;
+  --radius-sm: 12px;
+}
+[data-theme="dark"] {
+  --accent:        #409cff;
+  --accent-strong: #0a84ff;
+  --accent-soft:   rgba(64, 156, 255, 0.16);
+  --ring:          rgba(64, 156, 255, 0.4);
+
+  --app-bg: radial-gradient(1200px 800px at 10% -10%, #1b2740 0%, rgba(27,39,64,0) 55%),
+            radial-gradient(1000px 700px at 112% -5%, #16203a 0%, rgba(22,32,58,0) 50%),
+            linear-gradient(180deg, #0b1120 0%, #0e1424 100%);
+
+  --glass-bg:      rgba(30, 41, 59, 0.55);
+  --glass-bg-2:    rgba(30, 41, 59, 0.72);
+  --glass-border:  rgba(255, 255, 255, 0.10);
+  --glass-edge:    rgba(0, 0, 0, 0.35);
+  --elev-1: 0 1px 1px rgba(0,0,0,0.35), 0 8px 22px rgba(0,0,0,0.40);
+  --elev-2: 0 1px 1px rgba(0,0,0,0.4), 0 16px 36px rgba(0,0,0,0.5);
+
+  --metal:        linear-gradient(180deg, #2c374a 0%, #232d3e 50%, #1b2433 100%);
+  --metal-hover:  linear-gradient(180deg, #344056 0%, #28344a 50%, #20293a 100%);
+  --metal-border: rgba(255, 255, 255, 0.14);
+  --metal-inset:  inset 0 1px 0 rgba(255,255,255,0.08), inset 0 -1px 0 rgba(0,0,0,0.3);
+
+  --primary:       linear-gradient(180deg, #3a9bff 0%, #0a84ff 55%, #0a74da 100%);
+  --primary-hover: linear-gradient(180deg, #4aa6ff 0%, #1b8eff 55%, #0a7ce6 100%);
+  --primary-shadow: 0 1px 0 rgba(255,255,255,0.18) inset, 0 8px 20px rgba(10,132,255,0.4);
+}
+
+body {
+  background: var(--app-bg) fixed;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Headline with a subtle metallic sheen */
+.page-header h1 {
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  background: linear-gradient(180deg, var(--text-primary) 0%, var(--text-secondary) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Frosted-glass cards */
+.card {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  box-shadow: var(--elev-1);
+  -webkit-backdrop-filter: saturate(180%) blur(var(--glass-blur));
+  backdrop-filter: saturate(180%) blur(var(--glass-blur));
+  position: relative;
+}
+/* Hairline top highlight for the "metal edge" feel */
+.card::before {
+  content: "";
+  position: absolute; inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.55), rgba(255,255,255,0) 40%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+          mask-composite: exclude;
+  pointer-events: none;
+  opacity: 0.7;
+}
+[data-theme="dark"] .card::before {
+  background: linear-gradient(180deg, rgba(255,255,255,0.14), rgba(255,255,255,0) 45%);
+}
+
+/* Theme toggle as a machined metal disc */
+.theme-toggle-btn {
+  background: var(--metal);
+  border: 1px solid var(--metal-border);
+  box-shadow: var(--metal-inset), var(--elev-1);
+  transition: transform 0.15s ease, box-shadow 0.2s ease;
+}
+.theme-toggle-btn:hover { background: var(--metal-hover); transform: translateY(-1px); }
+.theme-toggle-btn:active { transform: translateY(0); }
+
+/* Inputs — recessed glass with an accent focus ring */
+input, select {
+  background: var(--glass-bg-2);
+  border: 1px solid var(--glass-edge);
+  border-radius: var(--radius-sm);
+  box-shadow: inset 0 1px 2px rgba(17,24,39,0.06);
+  transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+}
+[data-theme="dark"] input, [data-theme="dark"] select {
+  box-shadow: inset 0 1px 2px rgba(0,0,0,0.4);
+}
+input:focus, select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--ring);
+}
+
+/* Primary button — glossy accent */
+button {
+  background: var(--primary);
+  border: 1px solid var(--accent-strong);
+  border-radius: var(--radius-sm);
+  color: #fff;
+  font-weight: 600;
+  box-shadow: var(--primary-shadow);
+  transition: filter 0.15s, transform 0.12s, box-shadow 0.2s;
+}
+button:hover:not(:disabled) { background: var(--primary-hover); transform: translateY(-1px); }
+button:active:not(:disabled) { transform: translateY(0); filter: brightness(0.97); }
+
+/* Neutral / secondary controls — brushed metal */
+.btn-secondary, .dock-btn-secondary, .range-chip {
+  background: var(--metal);
+  border: 1px solid var(--metal-border);
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--metal-inset);
+  transition: background 0.15s, transform 0.12s;
+}
+.btn-secondary:hover, .dock-btn-secondary:hover { background: var(--metal-hover); }
+.btn-secondary:active { transform: translateY(1px); }
+
+/* Tab bar — glass capsule with accent active pill */
+.tab-nav {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: 999px;
+  box-shadow: var(--elev-1);
+  -webkit-backdrop-filter: saturate(180%) blur(var(--glass-blur));
+  backdrop-filter: saturate(180%) blur(var(--glass-blur));
+}
+.tab-btn { border-radius: 999px; font-weight: 600; }
+.tab-btn.active {
+  background: var(--primary);
+  color: #fff;
+  box-shadow: var(--primary-shadow);
+}
+@media (max-width: 900px) {
+  .tab-nav {
+    border-radius: 0;
+    -webkit-backdrop-filter: saturate(180%) blur(12px);
+    backdrop-filter: saturate(180%) blur(12px);
+    background: var(--glass-bg-2);
+  }
+}
+
+/* Elevated tile surfaces */
+.summary-card, .metric, .val-item, .dcf-item, .indicator-help-item, .criterion-item {
+  background: var(--glass-bg-2);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--elev-1);
+}
+
+/* Muted glass panels */
+.signal-card, .trend-narrative, .formula-block, .dcf-params, .onehand-dock {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  box-shadow: var(--elev-1);
+}
+
+/* Metallic accent dock primary */
+.dock-btn-primary { background: var(--primary); border-color: var(--accent-strong); box-shadow: var(--primary-shadow); }
+.range-chip.active { background: var(--primary); border-color: var(--accent-strong); color: #fff; }
+
+/* Bottom nav glass */
+.bottom-nav {
+  background: var(--glass-bg-2);
+  -webkit-backdrop-filter: saturate(180%) blur(16px);
+  backdrop-filter: saturate(180%) blur(16px);
+  border-top: 1px solid var(--glass-border);
+}
+
+/* ── Shareholder-spread slider controls (new in this release) ── */
+.subchart-title {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.slider-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.slider-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  min-width: 92px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.time-slider {
+  flex: 1;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--bg-hover);
+  box-shadow: inset 0 1px 2px rgba(17,24,39,0.18);
+  cursor: pointer;
+  padding: 0;
+  border: none;
+}
+.time-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  background: var(--metal);
+  border: 1px solid var(--metal-border);
+  box-shadow: var(--metal-inset), 0 2px 6px rgba(17,24,39,0.3);
+  cursor: pointer;
+}
+.time-slider::-moz-range-thumb {
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  background: var(--metal);
+  border: 1px solid var(--metal-border);
+  box-shadow: 0 2px 6px rgba(17,24,39,0.3);
+  cursor: pointer;
+}
+
+/* Reduce glass blur cost where the user prefers reduced motion/transparency */
+@media (prefers-reduced-transparency: reduce) {
+  .card, .tab-nav, .bottom-nav, .signal-card, .trend-narrative,
+  .formula-block, .dcf-params, .onehand-dock {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background: var(--bg-card);
+  }
+}

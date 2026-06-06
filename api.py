@@ -452,7 +452,7 @@ def revenue(
     start, end, _today = _compute_month_range(years)
 
     cache_key = build_cache_key(
-        "api_month_revenue",
+        "api_month_revenue_v2",  # v2: month derived from revenue_year/month, not announce date
         stock_id=sid,
         start=f"{start:%Y-%m}",
         end=f"{end:%Y-%m}",
@@ -1385,6 +1385,112 @@ def shareholding(
 
     cache.set(cache_key, {"ts": time.time(), "source": source_used, "rows": rows})
     return {"stock_id": sid, "source": source_used, "rows": rows}
+
+
+# ---------------------------------------------------------------------------
+# Shareholder structure distribution — 集保股權分散表 (weekly, by lot level)
+# ---------------------------------------------------------------------------
+
+# FinMind TaiwanStockHoldingSharesPer level → human label (15 lot brackets).
+_SPREAD_LEVEL_LABELS: dict[str, str] = {
+    "1": "1–999 股",
+    "2": "1,000–5,000 股",
+    "3": "5,001–10,000 股",
+    "4": "10,001–15,000 股",
+    "5": "15,001–20,000 股",
+    "6": "20,001–30,000 股",
+    "7": "30,001–40,000 股",
+    "8": "40,001–50,000 股",
+    "9": "50,001–100,000 股",
+    "10": "100,001–200,000 股",
+    "11": "200,001–400,000 股",
+    "12": "400,001–600,000 股",
+    "13": "600,001–800,000 股",
+    "14": "800,001–1,000,000 股",
+    "15": "1,000,001 股以上（大戶）",
+}
+
+
+@app.get("/api/stocks/{stock_id}/shareholding_spread")
+def shareholding_spread(
+    stock_id: str,
+    years: int = Query(default=3, ge=1, le=10),
+    token: str | None = Query(default=None),
+    x_finmind_token: str | None = Header(default=None, alias="X-FinMind-Token"),
+) -> dict[str, Any]:
+    """股東持股結構分佈 — 集保戶股權分散表 (FinMind TaiwanStockHoldingSharesPer).
+
+    Weekly data, broken down into 15 lot-size brackets (1 = 散戶 small lots,
+    15 = 大戶 > 1,000,000 shares). Returns each bracket's percent share over time
+    so the frontend can draw a stacked area chart plus a per-week pie chart.
+    """
+    sid = stock_id.strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="stock_id is required")
+
+    token_resolved = _require_token(token, x_finmind_token)
+
+    start, _end, today = _compute_month_range(years)
+    start_d = date(start.year, start.month, 1)
+
+    levels_meta = [{"level": lv, "label": lbl} for lv, lbl in _SPREAD_LEVEL_LABELS.items()]
+
+    cache_key = build_cache_key(
+        "api_shareholding_spread_v1",
+        stock_id=sid,
+        years=str(years),
+        asof=today.isoformat(),
+    )
+    cached = cache.get(cache_key)
+    if cached and "dates" in cached:
+        return {
+            "stock_id": sid,
+            "levels": levels_meta,
+            "dates": cached["dates"],
+            "percent": cached["percent"],
+            "error": cached.get("error"),
+        }
+
+    try:
+        client = FinMindClient(api_key=token_resolved)
+        df = client.fetch_shareholding_spread(sid, start_d, today)
+    except FinMindError as exc:
+        payload = {"dates": [], "percent": {}, "error": f"集保資料載入失敗：{str(exc)[:120]}"}
+        cache.set(cache_key, {"ts": time.time(), **payload})
+        return {"stock_id": sid, "levels": levels_meta, **payload}
+
+    if df.empty:
+        payload = {
+            "dates": [],
+            "percent": {},
+            "error": "查無集保股權分散資料（此資料集在部分 FinMind 方案需贊助等級）。",
+        }
+        cache.set(cache_key, {"ts": time.time(), **payload})
+        return {"stock_id": sid, "levels": levels_meta, **payload}
+
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["date"])
+    # Keep only the 15 known lot brackets; drop FinMind's 合計/差異數 rows (16/17).
+    df = df[df["HoldingSharesLevel"].isin(_SPREAD_LEVEL_LABELS.keys())]
+    df["percent"] = pd.to_numeric(df["percent"], errors="coerce")
+
+    # Pivot to date × level matrix of percents, ascending by date.
+    pivot = (
+        df.pivot_table(index="date", columns="HoldingSharesLevel", values="percent", aggfunc="last")
+        .sort_index()
+    )
+    dates = [str(d.date()) for d in pivot.index]
+    percent: dict[str, list[float | None]] = {}
+    for lv in _SPREAD_LEVEL_LABELS:
+        if lv in pivot.columns:
+            percent[lv] = [None if pd.isna(v) else round(float(v), 4) for v in pivot[lv]]
+        else:
+            percent[lv] = [None] * len(dates)
+
+    payload = {"dates": dates, "percent": percent, "error": None}
+    cache.set(cache_key, {"ts": time.time(), **payload})
+    return {"stock_id": sid, "levels": levels_meta, **payload}
 
 
 # ---------------------------------------------------------------------------

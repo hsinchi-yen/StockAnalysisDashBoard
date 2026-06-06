@@ -190,12 +190,109 @@ const dashboardState = {
   foreignHoldingData: null,
   valuationExtraData: null,
   latestSnapshot: null,
+  // === cache-restored extras ===
+  cashRows: [],
+  buyScoreData: null,
+  shareholdingSpreadData: null,
 };
 
 // DCF parameter state (preserved across re-queries)
 const dcfState = { g: 0.04, r: 0.08, mos: 0.30 };
 const FINMIND_TOKEN_STORAGE_KEY = "microeco.finmind_api_key";
 const PAID_API_STORAGE_KEY = "microeco.paid_api";
+
+// ── Last-query cache (localStorage) ───────────────────────────────────────────
+// Persists the most recent successful query so the dashboard opens instantly
+// with the previous result instead of auto-querying a hard-coded default stock.
+const QUERY_CACHE_KEY = "microeco.last_query_v1";
+let _cacheSaveTimer = null;
+
+function saveQueryCache(immediate = false) {
+  if (!dashboardState.stockId) return;
+  const write = () => {
+    const payload = {
+      stockId: dashboardState.stockId,
+      years: Number($("years").value) || 3,
+      dcf: { ...dcfState },
+      state: dashboardState,
+      savedAt: Date.now(),
+    };
+    try {
+      localStorage.setItem(QUERY_CACHE_KEY, JSON.stringify(payload));
+    } catch (e) {
+      // Quota exceeded or serialization failure — drop the cache silently.
+      console.warn("saveQueryCache failed:", e);
+      try { localStorage.removeItem(QUERY_CACHE_KEY); } catch {}
+    }
+  };
+  window.clearTimeout(_cacheSaveTimer);
+  if (immediate) { write(); return; }
+  // Debounce: avoid thrashing localStorage during a burst of render callbacks.
+  _cacheSaveTimer = window.setTimeout(write, 1500);
+}
+
+function loadQueryCache() {
+  let payload = null;
+  try {
+    const raw = localStorage.getItem(QUERY_CACHE_KEY);
+    if (!raw) return false;
+    payload = JSON.parse(raw);
+  } catch {
+    return false;
+  }
+  if (!payload || !payload.state || !payload.stockId) return false;
+
+  // Restore inputs
+  $("stockId").value = payload.stockId;
+  if (payload.years) $("years").value = String(payload.years);
+  if (payload.dcf) Object.assign(dcfState, payload.dcf);
+
+  // Restore state object (replace contents in place so references stay valid)
+  Object.keys(dashboardState).forEach((k) => { delete dashboardState[k]; });
+  Object.assign(dashboardState, payload.state);
+
+  restoreFromState();
+
+  const when = payload.savedAt ? new Date(payload.savedAt).toLocaleString("zh-TW", { hour12: false }) : "";
+  setStatus(`已載入上次查詢的快取資料：${payload.stockId}${when ? `（${when}）` : ""}，按「查詢」可更新`);
+  return true;
+}
+
+// Re-render every panel from dashboardState. Each panel is isolated so one
+// missing/old field cannot break the rest of the restore.
+function restoreFromState() {
+  if (!dashboardState.stockId) return;
+  const sid = dashboardState.stockId;
+  const safe = (label, fn) => { try { fn(); } catch (e) { console.warn(`restore ${label}:`, e); } };
+
+  // Core charts / tables (shared with rerenderDashboard)
+  safe("dashboard", () => rerenderDashboard());
+
+  // Latest price + institutional snapshot
+  safe("latest", () => {
+    const latest = dashboardState.latestSnapshot;
+    if (latest) renderLatestSnapshot(latest, sid);
+  });
+  // Revenue / dividend tables
+  safe("revenueTable", () => {
+    const rows = dashboardState.revenueRows || [];
+    if (rows.length) renderTable($("revenueTable"), ["月份", "營收", "MA3", "MA6", "MA12"],
+      rows.map((r) => [r.month || "-",
+        r.revenue == null ? "-" : formatNumber(r.revenue),
+        r.ma_3 == null ? "-" : formatNumber(r.ma_3),
+        r.ma_6 == null ? "-" : formatNumber(r.ma_6),
+        r.ma_12 == null ? "-" : formatNumber(r.ma_12)]));
+  });
+  safe("dividendTable", () => {
+    if ((dashboardState.cashRows || []).length && (dashboardState.priceRows || []).length)
+      renderDividendTable(dashboardState.cashRows, dashboardState.priceRows);
+  });
+  safe("dcf", () => { if (dashboardState.dcfData) renderDcf(dashboardState.dcfData); });
+  safe("shareholding", () => { if (dashboardState.shareholdingData) renderShareholding(dashboardState.shareholdingData); });
+  safe("shareholdingSpread", () => { if (dashboardState.shareholdingSpreadData) renderShareholdingSpread(dashboardState.shareholdingSpreadData); });
+  safe("buyScore", () => { if (dashboardState.buyScoreData) renderBuyScore(dashboardState.buyScoreData); });
+  safe("signalCard", () => renderSignalCard(dashboardState));
+}
 
 let resizeTimer = null;
 
@@ -1342,6 +1439,148 @@ function renderDcf(data) {
   `;
 }
 
+// ── NEW: Shareholder structure distribution (集保股權分散，逐週) ──────────────
+
+// 15-step palette: cool blues (小額散戶) → warm reds (大戶).
+const SPREAD_COLORS = [
+  "#0ea5e9", "#22d3ee", "#2dd4bf", "#34d399", "#a3e635",
+  "#fde047", "#fbbf24", "#fb923c", "#f97316", "#f87171",
+  "#ef4444", "#dc2626", "#e11d48", "#be123c", "#9f1239",
+];
+
+function renderShareholdingSpread(data) {
+  const panel = $("shareholdingSpreadPanel");
+  clearSkeleton("shareholdingSpreadPanel");
+  if (!panel) return;
+  panel.innerHTML = "";
+
+  const levels = (data && data.levels) || [];
+  const dates = (data && data.dates) || [];
+  const percent = (data && data.percent) || {};
+
+  if (!dates.length) {
+    panel.textContent = (data && data.error) || "查無集保股權分散資料。";
+    return;
+  }
+
+  const dark = isDarkMode();
+  const labelOf = (lv) => lv.label;
+
+  // ── Stacked area chart over weekly dates ──────────────────────────────
+  const stackedDiv = document.createElement("div");
+  stackedDiv.className = "chart";
+  stackedDiv.style.height = "320px";
+  panel.appendChild(stackedDiv);
+
+  const traces = levels.map((lv, i) => ({
+    x: dates,
+    y: percent[lv.level] || [],
+    type: "scatter",
+    mode: "lines",
+    stackgroup: "one",
+    name: lv.label,
+    line: { width: 0.5, color: SPREAD_COLORS[i] },
+    fillcolor: SPREAD_COLORS[i],
+    hovertemplate: `${lv.label}<br>%{x}<br>%{y:.2f}%<extra></extra>`,
+  }));
+
+  Plotly.newPlot(
+    stackedDiv,
+    traces,
+    baseChartLayout("持股級距占比堆疊（逐週）", {
+      height: 320,
+      hovermode: "closest",
+      xaxis: { type: "date", tickformat: "%Y/%m", rangeslider: { visible: true, thickness: 0.07 } },
+      yaxis: { title: "占比 (%)", rangemode: "tozero", ticksuffix: "%" },
+      legend: { orientation: "v", x: 1.02, y: 0.5, font: { size: 10 } },
+      margin: { l: 52, r: 160, t: 50, b: 36 },
+    }),
+    { ...PLOTLY_CONFIG, responsive: true }
+  );
+
+  // ── Pie chart for a selected week, driven by a time slider ────────────
+  const pieSection = document.createElement("div");
+  pieSection.style.marginTop = "20px";
+
+  const pieTitle = document.createElement("h3");
+  pieTitle.className = "subchart-title";
+  pieTitle.textContent = "持股結構圓餅圖（拖動時間軸選取週別）";
+  pieSection.appendChild(pieTitle);
+
+  const sliderRow = document.createElement("div");
+  sliderRow.className = "slider-row";
+
+  const slider = document.createElement("input");
+  slider.type = "range";
+  slider.min = "0";
+  slider.max = String(dates.length - 1);
+  slider.value = String(dates.length - 1);
+  slider.className = "time-slider";
+
+  const sliderLabel = document.createElement("span");
+  sliderLabel.className = "slider-label";
+  sliderLabel.textContent = dates[dates.length - 1] || "";
+
+  sliderRow.appendChild(slider);
+  sliderRow.appendChild(sliderLabel);
+  pieSection.appendChild(sliderRow);
+
+  const pieDiv = document.createElement("div");
+  pieDiv.style.height = "340px";
+  pieSection.appendChild(pieDiv);
+  panel.appendChild(pieSection);
+
+  function updatePie(idx) {
+    sliderLabel.textContent = dates[idx] || "";
+    const labels = [];
+    const values = [];
+    const colors = [];
+    levels.forEach((lv, i) => {
+      const v = (percent[lv.level] || [])[idx];
+      if (v != null && !Number.isNaN(v)) {
+        labels.push(labelOf(lv));
+        values.push(v);
+        colors.push(SPREAD_COLORS[i]);
+      }
+    });
+    if (!values.length) {
+      Plotly.purge(pieDiv);
+      pieDiv.textContent = "此週無比例資料";
+      return;
+    }
+    Plotly.react(
+      pieDiv,
+      [{
+        type: "pie",
+        labels,
+        values,
+        marker: { colors },
+        textinfo: "percent",
+        sort: false,
+        direction: "clockwise",
+        hovertemplate: "%{label}<br>%{value:.2f}%<extra></extra>",
+        hole: 0.4,
+      }],
+      baseChartLayout(`持股結構 ${dates[idx] || ""}`, {
+        height: 340,
+        hovermode: "closest",
+        margin: { l: 20, r: 20, t: 50, b: 20 },
+        legend: { orientation: "v", x: 1.0, y: 0.5, font: { size: 10 } },
+      }),
+      { ...PLOTLY_CONFIG, responsive: true }
+    );
+  }
+
+  slider.addEventListener("input", () => updatePie(Number(slider.value)));
+  updatePie(dates.length - 1);
+
+  const note = document.createElement("p");
+  note.className = "chart-note";
+  note.style.marginTop = "8px";
+  note.textContent = "資料來源：FinMind 集保戶股權分散表（逐週）。級距 1 為小額散戶、級距 15 為持股逾百萬股大戶。";
+  panel.appendChild(note);
+}
+
 // ── NEW: Shareholding ────────────────────────────────────────────────────────
 
 function renderShareholding(data) {
@@ -1388,6 +1627,11 @@ function renderShareholding(data) {
   }
 
   const dates = sorted.map((r) => r.date);
+
+  // Theme-aware chart colors (kept in sync with the active light/dark theme).
+  const shDark = isDarkMode();
+  const shBg = shDark ? "#1e293b" : "#ffffff";
+  const shFont = shDark ? "#e2e8f0" : "#374151";
 
   // Helper: extract series, replace null with null (gaps are fine)
   function col(field) {
@@ -1449,8 +1693,8 @@ function renderShareholding(data) {
       yaxis2: { title: "%", overlaying: "y", side: "right", tickformat: ".2f" },
       legend: { orientation: "h", y: 1.15, x: 0, font: { size: 11 } },
       title: { text: "非獨立董監持股", font: { size: 13 }, x: 0.01 },
-      plot_bgcolor: "#1e293b", paper_bgcolor: "#1e293b",
-      font: { color: "#e2e8f0" },
+      plot_bgcolor: shBg, paper_bgcolor: shBg,
+      font: { color: shFont },
     },
     { ...PLOTLY_CONFIG, responsive: true }
   );
@@ -1487,8 +1731,8 @@ function renderShareholding(data) {
       yaxis2: { title: "%", overlaying: "y", side: "right", tickformat: ".2f" },
       legend: { orientation: "h", y: 1.15, x: 0, font: { size: 11 } },
       title: { text: "獨立董監持股", font: { size: 13 }, x: 0.01 },
-      plot_bgcolor: "#1e293b", paper_bgcolor: "#1e293b",
-      font: { color: "#e2e8f0" },
+      plot_bgcolor: shBg, paper_bgcolor: shBg,
+      font: { color: shFont },
     },
     { ...PLOTLY_CONFIG, responsive: true }
   );
@@ -1525,8 +1769,8 @@ function renderShareholding(data) {
       yaxis2: { title: "%", overlaying: "y", side: "right", tickformat: ".2f" },
       legend: { orientation: "h", y: 1.15, x: 0, font: { size: 11 } },
       title: { text: "全體董監持股", font: { size: 13 }, x: 0.01 },
-      plot_bgcolor: "#1e293b", paper_bgcolor: "#1e293b",
-      font: { color: "#e2e8f0" },
+      plot_bgcolor: shBg, paper_bgcolor: shBg,
+      font: { color: shFont },
     },
     { ...PLOTLY_CONFIG, responsive: true }
   );
@@ -1558,8 +1802,8 @@ function renderShareholding(data) {
       yaxis2: { title: "%", overlaying: "y", side: "right", tickformat: ".2f" },
       legend: { orientation: "h", y: 1.15, x: 0, font: { size: 11 } },
       title: { text: "外資持股", font: { size: 13 }, x: 0.01 },
-      plot_bgcolor: "#1e293b", paper_bgcolor: "#1e293b",
-      font: { color: "#e2e8f0" },
+      plot_bgcolor: shBg, paper_bgcolor: shBg,
+      font: { color: shFont },
     },
     { ...PLOTLY_CONFIG, responsive: true }
   );
@@ -1585,8 +1829,8 @@ function renderShareholding(data) {
       yaxis: { title: "張數", tickformat: ",.0f", side: "left" },
       legend: { orientation: "h", y: 1.15, x: 0, font: { size: 11 } },
       title: { text: "【發行張數】", font: { size: 13 }, x: 0.01 },
-      plot_bgcolor: "#1e293b", paper_bgcolor: "#1e293b",
-      font: { color: "#e2e8f0" },
+      plot_bgcolor: shBg, paper_bgcolor: shBg,
+      font: { color: shFont },
     },
     { ...PLOTLY_CONFIG, responsive: true }
   );
@@ -1693,9 +1937,9 @@ function renderShareholding(data) {
         height: 320,
         margin: { l: 20, r: 20, t: 40, b: 20 },
         title: { text: `持股結構 ${r?.date || ""}`, font: { size: 13 }, x: 0.5 },
-        plot_bgcolor: "#1e293b",
-        paper_bgcolor: "#1e293b",
-        font: { color: "#e2e8f0" },
+        plot_bgcolor: shBg,
+        paper_bgcolor: shBg,
+        font: { color: shFont },
         legend: { orientation: "v", x: 1.02, y: 0.5 },
       },
       { ...PLOTLY_CONFIG, responsive: true }
@@ -2661,6 +2905,66 @@ function hookDcfRecalc() {
   });
 }
 
+// ── Latest price + institutional snapshot (shared by query & cache-restore) ──
+function renderLatestSnapshot(latest, stockId) {
+  clearSkeleton("latestPrice");
+  clearSkeleton("institutional");
+  const stockName = (latest && latest.stock_name) || "";
+  const titleEl = $("latestPriceTitle");
+  if (titleEl) titleEl.textContent = `${stockId}${stockName ? " " + stockName : ""} 最新股價`;
+
+  const p = (latest && latest.price) || {};
+  renderMetrics($("latestPrice"), [
+    { key: "日期", value: p.date || "-" },
+    { key: "開盤", value: formatFloat2(p.open) },
+    { key: "最高", value: formatFloat2(p.high) },
+    { key: "最低", value: formatFloat2(p.low) },
+    { key: "收盤", value: formatFloat2(p.close) },
+    { key: "漲跌", value: formatFloat2(p.spread) },
+    { key: "成交量", value: formatNumber(p.volume) },
+    { key: "成交金額", value: formatNumber(p.money) },
+    { key: "成交筆數", value: formatNumber(p.turnover) },
+  ]);
+
+  const inst = (latest && latest.institutional) || [];
+  const instStatus = (latest && latest.institutional_status) || (inst.length ? "fresh" : "unavailable");
+  const instAsOf = (latest && latest.institutional_as_of) || null;
+  const instLag = Number((latest && latest.institutional_lag_days) || 0);
+  const noteEl = $("institutionalNote");
+  if (noteEl) {
+    let noteText = "";
+    let noteClass = "chart-note";
+    if (instStatus === "fresh" && instAsOf) {
+      noteText = `資料截至 ${instAsOf}`;
+    } else if (instStatus === "stale" && instAsOf) {
+      noteText = `資料截至 ${instAsOf}（延遲 ${instLag} 個交易日，T86 尚未更新最新交易日）`;
+      noteClass = "chart-note chart-note-warn";
+    } else if (instStatus === "unavailable") {
+      noteText = "法人資料尚未公布（TWSE T86 通常於盤後 15:30 後釋出，FinMind 同步可能再延遲數分鐘）。";
+      noteClass = "chart-note chart-note-warn";
+    }
+    if (noteText) {
+      noteEl.textContent = noteText;
+      noteEl.className = noteClass;
+      noteEl.style.display = "";
+    } else {
+      noteEl.style.display = "none";
+    }
+  }
+  if (inst.length === 0) {
+    $("institutional").textContent =
+      instStatus === "unavailable"
+        ? "法人買賣資料尚未公布，請於盤後 16:30 後重新查詢。"
+        : "查無法人買賣資訊。";
+  } else {
+    renderTable(
+      $("institutional"),
+      ["類別", "買進", "賣出", "買賣超"],
+      inst.map((row) => [row.category, formatNumber(row.buy), formatNumber(row.sell), formatNumber(row.net)])
+    );
+  }
+}
+
 // ── Main query ───────────────────────────────────────────────────────────────
 
 async function runQuery() {
@@ -2685,6 +2989,7 @@ async function runQuery() {
   showSkeleton("fcfQuarterlyChart");
   showSkeleton("dcfResult");
   showSkeleton("shareholdingTable");
+  showSkeleton("shareholdingSpreadPanel");
   showSkeleton("turnoverDaysChart");
   showSkeleton("peRiverChart");
   showSkeleton("marginsChart");
@@ -2713,6 +3018,7 @@ async function runQuery() {
   const pFcf = fetchJson(`${base}/free_cash_flow?years=${yr}`, token);
   const pFcfQuarterly = fetchJson(`${base}/free_cash_flow_quarterly?years=${yr}`, token);
   const pShareholding = fetchJson(`${base}/shareholding`, token);
+  const pShareholdingSpread = fetchJson(`${base}/shareholding_spread?years=${yr}`, token);
   const pTurnoverDays = fetchJson(`${base}/turnover_days?years=${yr}`, token);
   const pPeRiver = fetchJson(`${base}/pe_river?years=${yr}`, token);
   // New financial indicator endpoints
@@ -2725,7 +3031,7 @@ async function runQuery() {
 
   const allPromises = [
     pLatest, pRevenue, pPrice, pDYield, pDivCash, pVolume, pRoeRoa, pDcf,
-    pDebt, pFcf, pFcfQuarterly, pShareholding, pTurnoverDays, pPeRiver,
+    pDebt, pFcf, pFcfQuarterly, pShareholding, pShareholdingSpread, pTurnoverDays, pPeRiver,
     pMargins, pEpsTrend, pLiquidity, pForeignHolding, pValuationExtra,
     pBuyScore,
   ];
@@ -2742,6 +3048,8 @@ async function runQuery() {
       setStatus(`完成：${stockId}（${years} 年）`);
       progressDone(hasError);
       renderSignalCard(dashboardState);
+      // Persist this successful query so the next open restores it instantly.
+      saveQueryCache();
     } else {
       setStatus(`查詢中… ${doneCount}/${allPromises.length}`);
     }
@@ -2750,63 +3058,8 @@ async function runQuery() {
   // ── Group 1: fast core data ────────────────────────────────────────────────
   // Render latest price & institutional immediately when ready
   pLatest.then((latest) => {
-    clearSkeleton("latestPrice");
-    clearSkeleton("institutional");
-    const stockName = (latest && latest.stock_name) || "";
-    const titleEl = $("latestPriceTitle");
-    if (titleEl) titleEl.textContent = `${stockId}${stockName ? " " + stockName : ""} 最新股價`;
-
-    const p = latest.price || {};
     dashboardState.latestSnapshot = latest;
-    renderMetrics($("latestPrice"), [
-      { key: "日期", value: p.date || "-" },
-      { key: "開盤", value: formatFloat2(p.open) },
-      { key: "最高", value: formatFloat2(p.high) },
-      { key: "最低", value: formatFloat2(p.low) },
-      { key: "收盤", value: formatFloat2(p.close) },
-      { key: "漲跌", value: formatFloat2(p.spread) },
-      { key: "成交量", value: formatNumber(p.volume) },
-      { key: "成交金額", value: formatNumber(p.money) },
-      { key: "成交筆數", value: formatNumber(p.turnover) },
-    ]);
-
-    const inst = latest.institutional || [];
-    const instStatus = latest.institutional_status || (inst.length ? "fresh" : "unavailable");
-    const instAsOf = latest.institutional_as_of || null;
-    const instLag = Number(latest.institutional_lag_days || 0);
-    const noteEl = $("institutionalNote");
-    if (noteEl) {
-      let noteText = "";
-      let noteClass = "chart-note";
-      if (instStatus === "fresh" && instAsOf) {
-        noteText = `資料截至 ${instAsOf}`;
-      } else if (instStatus === "stale" && instAsOf) {
-        noteText = `資料截至 ${instAsOf}（延遲 ${instLag} 個交易日，T86 尚未更新最新交易日）`;
-        noteClass = "chart-note chart-note-warn";
-      } else if (instStatus === "unavailable") {
-        noteText = "法人資料尚未公布（TWSE T86 通常於盤後 15:30 後釋出，FinMind 同步可能再延遲數分鐘）。";
-        noteClass = "chart-note chart-note-warn";
-      }
-      if (noteText) {
-        noteEl.textContent = noteText;
-        noteEl.className = noteClass;
-        noteEl.style.display = "";
-      } else {
-        noteEl.style.display = "none";
-      }
-    }
-    if (inst.length === 0) {
-      $("institutional").textContent =
-        instStatus === "unavailable"
-          ? "法人買賣資料尚未公布，請於盤後 16:30 後重新查詢。"
-          : "查無法人買賣資訊。";
-    } else {
-      renderTable(
-        $("institutional"),
-        ["類別", "買進", "賣出", "買賣超"],
-        inst.map((row) => [row.category, formatNumber(row.buy), formatNumber(row.sell), formatNumber(row.net)])
-      );
-    }
+    renderLatestSnapshot(latest, stockId);
     renderFinancialFeed();
     onDone();
   }).catch((err) => {
@@ -2997,6 +3250,19 @@ async function runQuery() {
     onDone();
   });
 
+  // Shareholder structure distribution (集保股權分散) — slow, independent
+  pShareholdingSpread.then((data) => {
+    dashboardState.shareholdingSpreadData = data;
+    renderShareholdingSpread(data);
+    onDone();
+  }).catch((err) => {
+    console.error("shareholding_spread:", err);
+    clearSkeleton("shareholdingSpreadPanel");
+    const el = $("shareholdingSpreadPanel");
+    if (el) el.textContent = "股東持股結構分佈資料暫不可用：" + err.message;
+    onDone();
+  });
+
   // Turnover Days — slow, independent
   pTurnoverDays.then((data) => {
     const rows = (data && data.rows) || [];
@@ -3091,6 +3357,7 @@ async function runQuery() {
   });
 
   pBuyScore.then((data) => {
+    dashboardState.buyScoreData = data;
     renderBuyScore(data);
     onDone();
   }).catch((err) => {
@@ -3123,7 +3390,29 @@ initTheme();
 initQuickActions();
 initOneHandControls();
 
-// Auto-run only when saved key exists
-if (getSavedToken()) {
-  runQuery();
-}
+// On open: restore the last successful query from localStorage instead of
+// auto-querying a hard-coded default stock. If no cache exists, show a welcome
+// empty state and wait for the user to query.
+(function bootInitialData() {
+  const restored = loadQueryCache();
+  if (!restored) {
+    // No cached query: stop the initial skeleton shimmers so the page reads as
+    // an idle welcome state rather than a perpetual loading screen.
+    document.querySelectorAll(".skeleton-section").forEach((el) => {
+      el.classList.remove("skeleton-section");
+    });
+    const hint = $("shareholdingSpreadPanel");
+    if (hint && !hint.textContent.trim()) {
+      hint.innerHTML = '<p class="chart-note" style="margin:0;">輸入股票代號並按「查詢」即可載入分析資料。系統會記住您最後一次查詢，下次開啟時自動顯示。</p>';
+    }
+    setStatus("輸入股票代號後按「查詢」開始分析");
+  }
+})();
+
+// Flush the latest query to localStorage before the tab is hidden/closed so the
+// most recent result is always available on next open. (JS cannot run after the
+// page is fully closed, so we persist at the last reliable lifecycle hook.)
+window.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") saveQueryCache(true);
+});
+window.addEventListener("pagehide", () => saveQueryCache(true));
