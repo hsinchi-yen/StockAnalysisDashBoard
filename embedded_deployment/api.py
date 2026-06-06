@@ -1437,7 +1437,7 @@ def shareholding_spread(
     levels_meta = [{"level": lv, "label": lbl} for lv, lbl in _SPREAD_LEVEL_LABELS.items()]
 
     cache_key = build_cache_key(
-        "api_shareholding_spread_v2",
+        "api_shareholding_spread_v3",
         stock_id=sid,
         years=str(years),
         asof=today.isoformat(),

@@ -12,6 +12,27 @@ import requests
 
 FINMIND_API = "https://api.finmindtrade.com/api/v4/data"
 
+# FinMind TaiwanStockHoldingSharesPer returns descriptive strings for HoldingSharesLevel.
+# Map them to canonical numeric codes "1"–"15" used throughout this project.
+_FINMIND_LEVEL_MAP: dict[str, str] = {
+    "1-999": "1",
+    "1,000-5,000": "2",
+    "5,001-10,000": "3",
+    "10,001-15,000": "4",
+    "15,001-20,000": "5",
+    "20,001-30,000": "6",
+    "30,001-40,000": "7",
+    "40,001-50,000": "8",
+    "50,001-100,000": "9",
+    "100,001-200,000": "10",
+    "200,001-400,000": "11",
+    "400,001-600,000": "12",
+    "600,001-800,000": "13",
+    "800,001-1,000,000": "14",
+    "more than 1,000,001": "15",
+}
+
+
 class FinMindError(RuntimeError):
     pass
 
@@ -369,11 +390,10 @@ class FinMindClient:
 
 
     def fetch_shareholding_spread(self, stock_id: str, start_date: date, end_date: date, timeout: float = 30.0) -> pd.DataFrame:
-        """
-        Fetch TaiwanStockHoldingSharesPer (股權分散表)
-        1~15 represent different HoldingSharesLevels.
-        Level 15: > 1,000,000 shares (大戶)
-        Level 1~9: < 50,000 shares (散戶, generally 1-9 covers <50k or <100k depending on bracket)
+        """Fetch TaiwanStockHoldingSharesPer (集保股權分散表).
+
+        Returns DataFrame with columns: date, HoldingSharesLevel (str "1"–"15"), percent (float).
+        Rows for 'total' and 'difference' are dropped; only the 15 lot brackets are kept.
         """
         try:
             data = self._get_dataset(
@@ -384,8 +404,6 @@ class FinMindClient:
                 timeout=timeout,
             )
         except FinMindError as exc:
-            # This dataset is gated by sponsor level on some FinMind plans.
-            # Treat as unavailable data instead of hard-failing buy score flow.
             msg = str(exc).lower()
             if "level is register" in msg or "sponsor" in msg:
                 return pd.DataFrame(columns=["date", "HoldingSharesLevel", "percent"])
@@ -394,11 +412,14 @@ class FinMindClient:
         df = pd.DataFrame(data)
         if df.empty:
             return pd.DataFrame(columns=["date", "HoldingSharesLevel", "percent"])
-            
+
         df["date"] = pd.to_datetime(df["date"])
         df["percent"] = pd.to_numeric(df["percent"], errors="coerce")
-        df["HoldingSharesLevel"] = df["HoldingSharesLevel"].astype(str)
-        return df
+        # Normalize FinMind's descriptive level strings → canonical "1"–"15".
+        # Rows that don't map (total / difference) are dropped via dropna.
+        df["HoldingSharesLevel"] = df["HoldingSharesLevel"].astype(str).map(_FINMIND_LEVEL_MAP)
+        df = df.dropna(subset=["HoldingSharesLevel"])
+        return df[["date", "HoldingSharesLevel", "percent"]].copy()
 
     def fetch_balance_sheet(self, stock_id: str, start_date: date, end_date: date, timeout: float = 30.0) -> pd.DataFrame:
         """Fetch quarterly balance sheet (FinMind dataset: TaiwanStockBalanceSheet).
