@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from cache import CacheStore, build_cache_key
 from datasource_finmind import FinMindClient, FinMindError
+from datasource_moneydj import fetch_capital_formation_finmind, fetch_capital_formation_moneydj
 from datasource_tdcc import TDCCClient, TDCCError
 from series_builder import add_mas, build_continuous_month_index, compute_sloan_ratio, reindex_to_continuous_months
 
@@ -1506,6 +1507,72 @@ def shareholding_spread(
     payload = {"dates": dates, "percent": percent, "error": note}
     cache.set(cache_key, {"ts": time.time(), **payload})
     return {"stock_id": sid, "levels": levels_meta, **payload}
+
+
+# ---------------------------------------------------------------------------
+# Capital formation 股本形成
+# ---------------------------------------------------------------------------
+
+@app.get("/api/stocks/{stock_id}/capital_formation")
+def capital_formation(
+    stock_id: str,
+    token: str | None = Query(default=None),
+    x_finmind_token: str | None = Header(default=None, alias="X-FinMind-Token"),
+) -> dict[str, Any]:
+    """Cumulative 股本形成 breakdown (現金增資 / 盈餘轉增資 / 其他) in 億元.
+
+    Primary source: MoneyDJ HTML scraper (works without login for a small set of
+    popular stocks such as 2330).
+    Fallback: reconstructed from FinMind balance-sheet + dividend data; data
+    starts from ~2012, so pre-2012 capital is lumped into 其他.
+    """
+    sid = stock_id.strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="stock_id is required")
+
+    token_resolved = _resolve_token(token, x_finmind_token)
+
+    cache_key = build_cache_key(
+        "api_capital_formation_v1",
+        stock_id=sid,
+        asof=date.today().isoformat(),
+    )
+    cached = cache.get(cache_key)
+    if cached and isinstance(cached.get("rows"), list):
+        return {
+            "stock_id": sid,
+            "rows": cached["rows"],
+            "source": cached.get("source", "unknown"),
+            "note": cached.get("note"),
+        }
+
+    # ── Primary: MoneyDJ ─────────────────────────────────────────────────────
+    rows = fetch_capital_formation_moneydj(sid)
+    if rows:
+        source = "MoneyDJ"
+        note = None
+    else:
+        # ── Fallback: FinMind reconstruction ─────────────────────────────────
+        if not token_resolved:
+            raise HTTPException(
+                status_code=401,
+                detail="MoneyDJ資料需要登入，FinMind重建需要API金鑰。請提供token參數或X-FinMind-Token header。",
+            )
+        rows = fetch_capital_formation_finmind(sid, token_resolved)
+        source = "FinMind"
+        note = "資料來源：FinMind財務報表重建，2012年以前資本列入「其他」，僅供參考"
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="查無股本形成資料")
+
+    result = {
+        "stock_id": sid,
+        "rows": rows,
+        "source": source,
+        "note": note,
+    }
+    cache.set(cache_key, {"ts": time.time(), **result})
+    return result
 
 
 # ---------------------------------------------------------------------------

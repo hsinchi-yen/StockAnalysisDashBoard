@@ -288,6 +288,7 @@ function restoreFromState() {
       renderDividendTable(dashboardState.cashRows, dashboardState.priceRows);
   });
   safe("dcf", () => { if (dashboardState.dcfData) renderDcf(dashboardState.dcfData); });
+  safe("capitalFormation", () => { if (dashboardState.capitalFormationData) renderCapitalFormation(dashboardState.capitalFormationData); });
   safe("shareholding", () => { if (dashboardState.shareholdingData) renderShareholding(dashboardState.shareholdingData); });
   safe("shareholdingSpread", () => { if (dashboardState.shareholdingSpreadData) renderShareholdingSpread(dashboardState.shareholdingSpreadData); });
   safe("buyScore", () => { if (dashboardState.buyScoreData) renderBuyScore(dashboardState.buyScoreData); });
@@ -1437,6 +1438,117 @@ function renderDcf(data) {
     </div>
     ${statusText ? `<div class="dcf-status dcf-status-${statusClass}">${statusText}</div>` : ""}
   `;
+}
+
+// ── 股本形成 (Capital Formation) ──────────────────────────────────────────────
+
+function renderCapitalFormation(data) {
+  const panel = $("capitalFormationPanel");
+  clearSkeleton("capitalFormationPanel");
+  if (!panel) return;
+  panel.innerHTML = "";
+
+  const rows = (data && data.rows) || [];
+  if (!rows.length) {
+    panel.textContent = "查無股本形成資料。";
+    return;
+  }
+
+  if (data.note) {
+    const noteEl = document.createElement("p");
+    noteEl.className = "chart-note";
+    noteEl.style.color = "var(--accent)";
+    noteEl.textContent = data.note;
+    panel.appendChild(noteEl);
+  }
+
+  const years  = rows.map(r => String(r.year));
+  const cash   = rows.map(r => r.cash);
+  const earn   = rows.map(r => r.earnings);
+  const other  = rows.map(r => r.other);
+
+  // Stacked bar chart
+  const barDiv = document.createElement("div");
+  barDiv.className = "chart";
+  barDiv.style.height = "320px";
+  panel.appendChild(barDiv);
+
+  const barTraces = [
+    {
+      x: years, y: cash, name: "現金增資",
+      type: "bar", marker: { color: "#3b82f6" },
+      hovertemplate: "現金增資<br>%{x} 年：%{y:.2f} 億元<extra></extra>",
+    },
+    {
+      x: years, y: earn, name: "盈餘轉增資",
+      type: "bar", marker: { color: "#22c55e" },
+      hovertemplate: "盈餘轉增資<br>%{x} 年：%{y:.2f} 億元<extra></extra>",
+    },
+    {
+      x: years, y: other, name: "其他",
+      type: "bar", marker: { color: "#f59e0b" },
+      hovertemplate: "其他<br>%{x} 年：%{y:.2f} 億元<extra></extra>",
+    },
+  ];
+
+  Plotly.newPlot(
+    barDiv,
+    barTraces,
+    baseChartLayout("累計股本形成結構（億元）", {
+      height: 320,
+      barmode: "stack",
+      xaxis: { title: "年份", type: "category" },
+      yaxis: { title: "累計金額（億元）", rangemode: "tozero" },
+      legend: { orientation: "h", x: 0, y: -0.2 },
+      margin: { l: 60, r: 20, t: 50, b: 60 },
+    }),
+    { ...PLOTLY_CONFIG, responsive: true }
+  );
+
+  // Pie chart for latest year
+  const latest = rows[rows.length - 1];
+  const pieSection = document.createElement("div");
+  pieSection.style.marginTop = "20px";
+
+  const pieTitle = document.createElement("h3");
+  pieTitle.className = "subchart-title";
+  pieTitle.textContent = `最近年度股本結構圓餅圖（${latest.year} 年）`;
+  pieSection.appendChild(pieTitle);
+
+  const pieDiv = document.createElement("div");
+  pieDiv.style.height = "300px";
+  pieSection.appendChild(pieDiv);
+  panel.appendChild(pieSection);
+
+  const pieLabels = ["現金增資", "盈餘轉增資", "其他"];
+  const pieValues = [latest.cash, latest.earnings, latest.other];
+  const pieColors = ["#3b82f6", "#22c55e", "#f59e0b"];
+
+  Plotly.newPlot(
+    pieDiv,
+    [{
+      type: "pie",
+      labels: pieLabels,
+      values: pieValues,
+      marker: { colors: pieColors },
+      textinfo: "percent+label",
+      sort: false,
+      hole: 0.4,
+      hovertemplate: "%{label}<br>%{value:.2f} 億元（%{percent}）<extra></extra>",
+    }],
+    baseChartLayout(`股本結構（${latest.year}）`, {
+      height: 300,
+      margin: { l: 20, r: 20, t: 50, b: 20 },
+      legend: { orientation: "h", x: 0, y: -0.15 },
+    }),
+    { ...PLOTLY_CONFIG, responsive: true }
+  );
+
+  const srcNote = document.createElement("p");
+  srcNote.className = "chart-note";
+  srcNote.style.marginTop = "8px";
+  srcNote.textContent = `資料來源：${data.source || "未知"}。數值為歷年累計（億元）。`;
+  panel.appendChild(srcNote);
 }
 
 // ── NEW: Shareholder structure distribution (集保股權分散，逐週) ──────────────
@@ -3026,6 +3138,7 @@ async function runQuery() {
   const pDebt = fetchJson(`${base}/debt_ratio?years=${yr}`, token);
   const pFcf = fetchJson(`${base}/free_cash_flow?years=${yr}`, token);
   const pFcfQuarterly = fetchJson(`${base}/free_cash_flow_quarterly?years=${yr}`, token);
+  const pCapitalFormation = fetchJson(`${base}/capital_formation`, token);
   const pShareholding = fetchJson(`${base}/shareholding`, token);
   const pShareholdingSpread = fetchJson(`${base}/shareholding_spread?years=${yr}`, token);
   const pTurnoverDays = fetchJson(`${base}/turnover_days?years=${yr}`, token);
@@ -3040,9 +3153,9 @@ async function runQuery() {
 
   const allPromises = [
     pLatest, pRevenue, pPrice, pDYield, pDivCash, pVolume, pRoeRoa, pDcf,
-    pDebt, pFcf, pFcfQuarterly, pShareholding, pShareholdingSpread, pTurnoverDays, pPeRiver,
-    pMargins, pEpsTrend, pLiquidity, pForeignHolding, pValuationExtra,
-    pBuyScore,
+    pDebt, pFcf, pFcfQuarterly, pCapitalFormation, pShareholding, pShareholdingSpread,
+    pTurnoverDays, pPeRiver, pMargins, pEpsTrend, pLiquidity, pForeignHolding,
+    pValuationExtra, pBuyScore,
   ];
   let doneCount = 0;
   let hasError = false;
@@ -3241,6 +3354,19 @@ async function runQuery() {
       el.classList.remove("skeleton-section");
       el.textContent = "季累積現金流量資料載入失敗: " + err.message;
     }
+    onDone();
+  });
+
+  // Capital formation — independent
+  pCapitalFormation.then((data) => {
+    dashboardState.capitalFormationData = data;
+    renderCapitalFormation(data);
+    onDone();
+  }).catch((err) => {
+    console.error("capital_formation:", err);
+    clearSkeleton("capitalFormationPanel");
+    const el = $("capitalFormationPanel");
+    if (el) el.textContent = "股本形成資料暫不可用：" + err.message;
     onDone();
   });
 
