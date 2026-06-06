@@ -68,7 +68,9 @@ def _parse_moneydj_html(content: bytes) -> list[dict[str, Any]] | None:
             except (ValueError, IndexError):
                 continue
 
-    return rows if rows else None
+    if not rows:
+        return None
+    return sorted(rows, key=lambda r: r["year"])
 
 
 def fetch_capital_formation_moneydj(stock_id: str) -> list[dict[str, Any]] | None:
