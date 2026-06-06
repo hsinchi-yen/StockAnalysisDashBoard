@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from cache import CacheStore, build_cache_key
 from datasource_finmind import FinMindClient, FinMindError
+from datasource_tdcc import TDCCClient, TDCCError
 from series_builder import add_mas, build_continuous_month_index, compute_sloan_ratio, reindex_to_continuous_months
 
 try:
@@ -1436,7 +1437,7 @@ def shareholding_spread(
     levels_meta = [{"level": lv, "label": lbl} for lv, lbl in _SPREAD_LEVEL_LABELS.items()]
 
     cache_key = build_cache_key(
-        "api_shareholding_spread_v1",
+        "api_shareholding_spread_v2",
         stock_id=sid,
         years=str(years),
         asof=today.isoformat(),
@@ -1451,19 +1452,32 @@ def shareholding_spread(
             "error": cached.get("error"),
         }
 
+    df: pd.DataFrame | None = None
+    data_source = "FinMind"
+
+    # Try FinMind first; fall back to TDCC scraper if plan restriction or empty.
     try:
         client = FinMindClient(api_key=token_resolved)
         df = client.fetch_shareholding_spread(sid, start_d, today)
-    except FinMindError as exc:
-        payload = {"dates": [], "percent": {}, "error": f"集保資料載入失敗：{str(exc)[:120]}"}
-        cache.set(cache_key, {"ts": time.time(), **payload})
-        return {"stock_id": sid, "levels": levels_meta, **payload}
+    except FinMindError:
+        df = pd.DataFrame()  # trigger TDCC fallback below
 
-    if df.empty:
+    if df is None or df.empty:
+        # FinMind unavailable or plan-restricted — scrape TDCC directly (free, ~1 year history).
+        data_source = "TDCC"
+        try:
+            tdcc = TDCCClient()
+            df = tdcc.fetch_shareholding_spread(sid, start_d, today)
+        except TDCCError as exc:
+            payload = {"dates": [], "percent": {}, "error": f"集保資料暫時無法取得：{str(exc)[:120]}"}
+            cache.set(cache_key, {"ts": time.time(), **payload})
+            return {"stock_id": sid, "levels": levels_meta, **payload}
+
+    if df is None or df.empty:
         payload = {
             "dates": [],
             "percent": {},
-            "error": "查無集保股權分散資料（此資料集在部分 FinMind 方案需贊助等級）。",
+            "error": "查無集保股權分散資料（FinMind 方案限制，TDCC 亦查無資料）。",
         }
         cache.set(cache_key, {"ts": time.time(), **payload})
         return {"stock_id": sid, "levels": levels_meta, **payload}
@@ -1488,7 +1502,8 @@ def shareholding_spread(
         else:
             percent[lv] = [None] * len(dates)
 
-    payload = {"dates": dates, "percent": percent, "error": None}
+    note = None if data_source == "FinMind" else "資料來源：集保結算所（TDCC），最多顯示近 1 年週度資料"
+    payload = {"dates": dates, "percent": percent, "error": note}
     cache.set(cache_key, {"ts": time.time(), **payload})
     return {"stock_id": sid, "levels": levels_meta, **payload}
 

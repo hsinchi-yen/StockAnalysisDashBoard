@@ -1463,6 +1463,15 @@ function renderShareholdingSpread(data) {
     return;
   }
 
+  // Show TDCC data-source note (non-critical) if backend fell back to scraper
+  if (data && data.error) {
+    const noteEl = document.createElement("p");
+    noteEl.className = "chart-note";
+    noteEl.style.color = "var(--accent)";
+    noteEl.textContent = data.error;
+    panel.appendChild(noteEl);
+  }
+
   const dark = isDarkMode();
   const labelOf = (lv) => lv.label;
 
