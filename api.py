@@ -2075,13 +2075,13 @@ def forward_rolling_eps(
     start_ext_date = date(int(start_ext.year), int(start_ext.month), 1)
 
     cache_key = build_cache_key(
-        "api_forward_rolling_eps_v1",
+        "api_forward_rolling_eps_v2",
         stock_id=sid,
         years=str(years),
         asof=today.isoformat(),
     )
     cached = cache.get(cache_key)
-    if cached and "forward_eps" in cached:
+    if cached and "forward_eps_m2" in cached:
         return {"stock_id": sid, **{k: v for k, v in cached.items() if k != "ts"}}
 
     try:
@@ -2216,6 +2216,62 @@ def forward_rolling_eps(
             if pe_high is not None:
                 price_high = round(forward_eps * pe_high, 0)
 
+        # --- Method 2: net margin factor (稅後淨利率) ---
+        latest_q_net_margin: float | None = None
+        last_year_q4_net_margin: float | None = None
+        net_margin_factor: float = 1.0
+        net_margin_factor_capped: bool = False
+
+        if not df_margins.empty and "net_margin" in df_margins.columns:
+            valid_net = df_margins[df_margins["net_margin"].notna()].copy()
+            if not valid_net.empty:
+                latest_q_net_margin = round(float(valid_net.iloc[-1]["net_margin"]), 2)
+
+                if last_complete_year is not None:
+                    ly_q4_net = valid_net[
+                        valid_net["quarter"].apply(
+                            lambda q: q.startswith(str(last_complete_year)) and q.endswith("-12-31")
+                        )
+                    ]
+                    if not ly_q4_net.empty:
+                        last_year_q4_net_margin = round(float(ly_q4_net.iloc[-1]["net_margin"]), 2)
+                    else:
+                        ly_net_rows = valid_net[
+                            valid_net["quarter"].apply(lambda q: q.startswith(str(last_complete_year)))
+                        ]
+                        if not ly_net_rows.empty:
+                            last_year_q4_net_margin = round(float(ly_net_rows["net_margin"].mean()), 2)
+
+                if last_year_q4_net_margin is not None and last_year_q4_net_margin != 0:
+                    raw_nf = latest_q_net_margin / last_year_q4_net_margin
+                    if raw_nf > 2.0:
+                        net_margin_factor = 2.0
+                        net_margin_factor_capped = True
+                    elif raw_nf < 0.5:
+                        net_margin_factor = 0.5
+                        net_margin_factor_capped = True
+                    else:
+                        net_margin_factor = round(raw_nf, 3)
+                elif last_year_q4_net_margin == 0:
+                    warnings_out.append("去年全年淨利率為零，Method 2 因子設為 1")
+
+        # Method 2 forward EPS: last_year_eps × (1 + avg_yoy) × net_margin_factor
+        forward_eps_m2: float | None = None
+        if last_year_annual_eps is not None and last_year_annual_eps > 0 and avg_rev_yoy is not None:
+            forward_eps_m2 = round(last_year_annual_eps * (1 + avg_rev_yoy / 100) * net_margin_factor, 2)
+
+        # Method 2 price targets
+        price_low_m2: float | None = None
+        price_mid_m2: float | None = None
+        price_high_m2: float | None = None
+        if forward_eps_m2 is not None and forward_eps_m2 > 0:
+            if pe_low is not None:
+                price_low_m2 = round(forward_eps_m2 * pe_low, 0)
+            if pe_mid is not None:
+                price_mid_m2 = round(forward_eps_m2 * pe_mid, 0)
+            if pe_high is not None:
+                price_high_m2 = round(forward_eps_m2 * pe_high, 0)
+
         # --- Current price ---
         current_price: float | None = None
         pr_df = client.fetch_stock_price(sid, date(today.year - 1, today.month, 1), today)
@@ -2233,28 +2289,43 @@ def forward_rolling_eps(
         raise HTTPException(status_code=502, detail=str(e))
 
     result: dict[str, Any] = {
+        # ── Shared inputs ──────────────────────────────────────────────────
         "last_complete_year": last_complete_year,
         "last_year_annual_eps": last_year_annual_eps,
         "avg_rev_yoy": avg_rev_yoy,
         "rev_months_used": rev_months_used,
         "rev_yoy_values": rev_yoy_values,
+        "current_price": current_price,
+        "pe_low": pe_low,
+        "pe_mid": pe_mid,
+        "pe_high": pe_high,
+        "pe_years": years,
+        # ── Method 1: 營業利益率調整 ──────────────────────────────────────
         "latest_margin_quarter": latest_margin_quarter,
         "latest_q_op_margin": latest_q_op_margin,
         "last_year_avg_op_margin": last_year_avg_op_margin,
         "margin_factor": round(margin_factor, 3),
         "margin_factor_capped": margin_factor_capped,
         "forward_eps": forward_eps,
-        "pe_low": pe_low,
-        "pe_mid": pe_mid,
-        "pe_high": pe_high,
-        "pe_years": years,
         "price_low": price_low,
         "price_mid": price_mid,
         "price_high": price_high,
-        "current_price": current_price,
         "upside_low": _upside(price_low),
         "upside_mid": _upside(price_mid),
         "upside_high": _upside(price_high),
+        # ── Method 2: 稅後淨利率調整 ──────────────────────────────────────
+        "latest_q_net_margin": latest_q_net_margin,
+        "last_year_q4_net_margin": last_year_q4_net_margin,
+        "net_margin_factor": round(net_margin_factor, 3),
+        "net_margin_factor_capped": net_margin_factor_capped,
+        "forward_eps_m2": forward_eps_m2,
+        "price_low_m2": price_low_m2,
+        "price_mid_m2": price_mid_m2,
+        "price_high_m2": price_high_m2,
+        "upside_low_m2": _upside(price_low_m2),
+        "upside_mid_m2": _upside(price_mid_m2),
+        "upside_high_m2": _upside(price_high_m2),
+        # ─────────────────────────────────────────────────────────────────
         "warnings": warnings_out,
     }
     cache.set(cache_key, {"ts": time.time(), **result})

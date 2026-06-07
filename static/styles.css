@@ -1055,6 +1055,7 @@ button:active:not(:disabled) { transform: translateY(0); filter: brightness(0.97
 .fre-cell-price { font-size: 20px; font-weight: 700; margin-bottom: 4px; }
 .fre-cell-upside { font-size: 13px; font-weight: 600; }
 
+/* Method 1 cells */
 .fre-green  { background: #d1fae5; border-color: #6ee7b7; }
 .fre-yellow { background: #fef9c3; border-color: #fde68a; }
 .fre-red    { background: #fee2e2; border-color: #fca5a5; }
@@ -1063,9 +1064,59 @@ button:active:not(:disabled) { transform: translateY(0); filter: brightness(0.97
 [data-theme="dark"] .fre-yellow { background: #451a03; border-color: #78350f; }
 [data-theme="dark"] .fre-red    { background: #450a0a; border-color: #7f1d1d; }
 
+/* Method 2 cells — slightly brighter / bolder border to distinguish */
+.fre-green.fre-m2  { background: #a7f3d0; border-color: #34d399; border-width: 2px; }
+.fre-yellow.fre-m2 { background: #fef08a; border-color: #facc15; border-width: 2px; }
+.fre-red.fre-m2    { background: #fecaca; border-color: #f87171; border-width: 2px; }
+
+[data-theme="dark"] .fre-green.fre-m2  { background: #065f46; border-color: #10b981; border-width: 2px; }
+[data-theme="dark"] .fre-yellow.fre-m2 { background: #78350f; border-color: #f59e0b; border-width: 2px; }
+[data-theme="dark"] .fre-red.fre-m2    { background: #7f1d1d; border-color: #ef4444; border-width: 2px; }
+
+/* Method header row */
+.fre-method-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: var(--text-primary);
+}
+.fre-method-sub {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-faint);
+  margin-left: 2px;
+}
+.fre-method-badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 99px;
+  flex-shrink: 0;
+}
+.fre-badge-m1 { background: #dbeafe; color: #1d4ed8; }
+.fre-badge-m2 { background: #d1fae5; color: #065f46; }
+[data-theme="dark"] .fre-badge-m1 { background: #1e3a5f; color: #93c5fd; }
+[data-theme="dark"] .fre-badge-m2 { background: #064e3b; color: #6ee7b7; }
+
+/* Method detail inline row */
+.fre-method-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+.fre-method-detail span b { color: var(--text-primary); }
+
 @media (max-width: 480px) {
   .fre-price-grid { grid-template-columns: 1fr; }
   .fre-key { min-width: 110px; }
+  .fre-method-detail { flex-direction: column; gap: 3px; }
 }
 
 /* Reduce glass blur cost where the user prefers reduced motion/transparency */

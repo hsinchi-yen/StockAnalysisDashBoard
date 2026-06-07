@@ -2875,24 +2875,18 @@ function renderForwardRollingEps(data) {
   }
   function fmtUpside(pct) {
     if (pct === null || pct === undefined) return "N/A";
-    const sign = pct >= 0 ? "+" : "";
-    return `${sign}${pct.toFixed(1)}%`;
+    return `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`;
   }
   function fmtPrice(p) {
     return (p !== null && p !== undefined) ? `NT$ ${formatFloat2(p)}` : "N/A";
   }
   function fmtPct(v) {
     if (v === null || v === undefined) return "N/A";
-    const sign = v >= 0 ? "+" : "";
-    return `${sign}${v.toFixed(1)}%`;
+    return `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`;
   }
-
-  const revMonths = (data.rev_months_used || []).join("、");
-  const revYoys = (data.rev_yoy_values || []).map(v => fmtPct(v)).join(" / ");
-  const capNote = data.margin_factor_capped ? " (已限制 0.5×–2.0×)" : "";
-  const warnHtml = (data.warnings || []).length
-    ? `<p class="chart-note" style="color:#b45309;margin-top:6px;">${(data.warnings || []).join("；")}</p>`
-    : "";
+  function fmtVal(v, suffix = "") {
+    return (v !== null && v !== undefined) ? `${formatFloat2(v)}${suffix}` : "N/A";
+  }
 
   function priceCell(label, pe, price, upside, bgClass) {
     const peStr = (pe !== null && pe !== undefined) ? `P/E ${formatFloat2(pe)}×` : "P/E N/A";
@@ -2905,31 +2899,79 @@ function renderForwardRollingEps(data) {
       </div>`;
   }
 
-  const mfVal = data.margin_factor !== null && data.margin_factor !== undefined
-    ? `${data.margin_factor.toFixed(3)}${capNote}` : "N/A";
-  const fwdEpsVal = data.forward_eps !== null && data.forward_eps !== undefined
-    ? `NT$ ${formatFloat2(data.forward_eps)}` : "N/A";
-  const lyEpsVal = data.last_year_annual_eps !== null && data.last_year_annual_eps !== undefined
-    ? `NT$ ${formatFloat2(data.last_year_annual_eps)}` : "N/A";
+  // ── Shared inputs ──────────────────────────────────────────────────────────
+  const revMonths   = (data.rev_months_used || []).join("、");
+  const revYoys     = (data.rev_yoy_values  || []).map(v => fmtPct(v)).join(" / ");
+  const avgYoyStr   = data.avg_rev_yoy !== null && data.avg_rev_yoy !== undefined ? fmtPct(data.avg_rev_yoy) : "N/A";
+  const lyEps       = data.last_year_annual_eps;
+  const lyEpsStr    = lyEps !== null && lyEps !== undefined ? `NT$ ${formatFloat2(lyEps)}` : "N/A";
+
+  // ── Method 1: 營業利益率調整 ───────────────────────────────────────────────
+  const m1Cap   = data.margin_factor_capped ? " ⚠️已限制" : "";
+  const m1Mf    = data.margin_factor !== null && data.margin_factor !== undefined ? `${data.margin_factor.toFixed(3)}${m1Cap}` : "N/A";
+  const m1Eps   = data.forward_eps   !== null && data.forward_eps   !== undefined ? `NT$ ${formatFloat2(data.forward_eps)}`   : "N/A";
+  const m1OpNow = data.latest_q_op_margin !== null && data.latest_q_op_margin !== undefined ? `${data.latest_q_op_margin.toFixed(1)}%` : "N/A";
+  const m1OpLy  = data.last_year_avg_op_margin !== null && data.last_year_avg_op_margin !== undefined ? `${data.last_year_avg_op_margin.toFixed(1)}%` : "N/A";
+
+  // ── Method 2: 稅後淨利率調整 ──────────────────────────────────────────────
+  const m2Cap   = data.net_margin_factor_capped ? " ⚠️已限制" : "";
+  const m2Mf    = data.net_margin_factor !== null && data.net_margin_factor !== undefined ? `${data.net_margin_factor.toFixed(3)}${m2Cap}` : "N/A";
+  const m2Eps   = data.forward_eps_m2   !== null && data.forward_eps_m2   !== undefined ? `NT$ ${formatFloat2(data.forward_eps_m2)}`   : "N/A";
+  const m2NmNow = data.latest_q_net_margin !== null && data.latest_q_net_margin !== undefined ? `${data.latest_q_net_margin.toFixed(1)}%` : "N/A";
+  const m2NmLy  = data.last_year_q4_net_margin !== null && data.last_year_q4_net_margin !== undefined ? `${data.last_year_q4_net_margin.toFixed(1)}%` : "N/A";
+
+  const warnHtml = (data.warnings || []).length
+    ? `<p class="chart-note" style="color:#b45309;margin-top:8px;">${(data.warnings || []).join("；")}</p>`
+    : "";
 
   el.innerHTML = `
+    <!-- 共用假設 -->
     <div class="fre-assumptions">
-      <div class="fre-row"><span class="fre-key">使用月份</span><span class="fre-val">${revMonths || "N/A"}</span></div>
-      <div class="fre-row"><span class="fre-key">月營收 YoY</span><span class="fre-val">${revYoys || "N/A"} → 平均 ${data.avg_rev_yoy !== null && data.avg_rev_yoy !== undefined ? fmtPct(data.avg_rev_yoy) : "N/A"}</span></div>
-      <div class="fre-row"><span class="fre-key">利潤率依據</span><span class="fre-val">${data.latest_margin_quarter || "N/A"}：${data.latest_q_op_margin !== null && data.latest_q_op_margin !== undefined ? data.latest_q_op_margin.toFixed(1) + "%" : "N/A"}</span></div>
-      <div class="fre-row"><span class="fre-key">去年全年利潤率 (${data.last_complete_year || "-"})</span><span class="fre-val">${data.last_year_avg_op_margin !== null && data.last_year_avg_op_margin !== undefined ? data.last_year_avg_op_margin.toFixed(1) + "%" : "N/A"}</span></div>
-      <div class="fre-row"><span class="fre-key">Margin Factor</span><span class="fre-val">${mfVal}</span></div>
-      <div class="fre-row"><span class="fre-key">去年全年 EPS</span><span class="fre-val">${lyEpsVal}</span></div>
-      <div class="fre-row"><span class="fre-key">前瞻 EPS（估）</span><span class="fre-val" style="font-weight:700;">${fwdEpsVal}</span></div>
+      <div class="fre-row"><span class="fre-key">YoY 月份</span><span class="fre-val">${revMonths || "N/A"}</span></div>
+      <div class="fre-row"><span class="fre-key">月營收 YoY</span><span class="fre-val">${revYoys || "N/A"} → 平均 ${avgYoyStr}</span></div>
+      <div class="fre-row"><span class="fre-key">去年全年 EPS（${data.last_complete_year || "-"}）</span><span class="fre-val">${lyEpsStr}</span></div>
+    </div>
+
+    <!-- 方法一 -->
+    <div class="fre-method-header">
+      <span class="fre-method-badge fre-badge-m1">方法一</span>
+      EPS 成長調整法
+      <span class="fre-method-sub">以營業利益率推估前瞻 EPS</span>
+    </div>
+    <div class="fre-method-detail">
+      <span>最新季營業利益率：<b>${m1OpNow}</b>（${data.latest_margin_quarter || "-"}）</span>
+      <span>去年全年：<b>${m1OpLy}</b></span>
+      <span>Factor：<b>${m1Mf}</b></span>
+      <span>→ 前瞻 EPS：<b>${m1Eps}</b></span>
     </div>
     <div class="fre-price-grid">
-      ${priceCell("安全邊際", data.pe_low, data.price_low, data.upside_low, "fre-green")}
-      ${priceCell("合理估值", data.pe_mid, data.price_mid, data.upside_mid, "fre-yellow")}
+      ${priceCell("安全邊際", data.pe_low,  data.price_low,  data.upside_low,  "fre-green")}
+      ${priceCell("合理估值", data.pe_mid,  data.price_mid,  data.upside_mid,  "fre-yellow")}
       ${priceCell("最高風險", data.pe_high, data.price_high, data.upside_high, "fre-red")}
     </div>
+
+    <!-- 方法二 -->
+    <div class="fre-method-header" style="margin-top:16px;">
+      <span class="fre-method-badge fre-badge-m2">方法二</span>
+      淨利率直推法
+      <span class="fre-method-sub">以稅後淨利率直接推估前瞻 EPS（較樂觀）</span>
+    </div>
+    <div class="fre-method-detail">
+      <span>最新季稅後淨利率：<b>${m2NmNow}</b>（${data.latest_margin_quarter || "-"}）</span>
+      <span>去年全年：<b>${m2NmLy}</b></span>
+      <span>Factor：<b>${m2Mf}</b></span>
+      <span>→ 前瞻 EPS：<b>${m2Eps}</b></span>
+    </div>
+    <div class="fre-price-grid">
+      ${priceCell("安全邊際", data.pe_low,    data.price_low_m2,  data.upside_low_m2,  "fre-green fre-m2")}
+      ${priceCell("合理估值", data.pe_mid,    data.price_mid_m2,  data.upside_mid_m2,  "fre-yellow fre-m2")}
+      ${priceCell("最高風險", data.pe_high,   data.price_high_m2, data.upside_high_m2, "fre-red fre-m2")}
+    </div>
+
     ${warnHtml}
     <p class="chart-note" style="margin-top:10px;">
-      前瞻 EPS ＝ 去年全年 EPS × (1 + 近 3 月平均月營收 YoY) × 利潤率因子。P/E 採近 ${data.pe_years || 5} 年歷史日頻資料 p25 / p50 / p75 百分位。此為輔助估算，非投資建議。
+      兩種方法皆為：去年全年 EPS × (1 + 近 3 月平均月營收 YoY) × 利潤率因子。差異在於方法一用<b>營業利益率</b>、方法二用<b>稅後淨利率</b>。
+      P/E 採近 ${data.pe_years || 5} 年歷史日頻資料 p25 / p50 / p75 百分位。此為輔助估算，非投資建議。
     </p>`;
 }
 
