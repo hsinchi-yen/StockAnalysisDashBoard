@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(env)",
+      "Bash(python -c \"import pandas, requests, lxml; print\\('pandas', pandas.__version__\\); print\\('lxml ok'\\)\")"
+    ]
+  }
+}
