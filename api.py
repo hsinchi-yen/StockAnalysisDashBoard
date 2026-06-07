@@ -2049,6 +2049,218 @@ def valuation_extra(
     return {"stock_id": sid, **result}
 
 
+@app.get("/api/stocks/{stock_id}/forward_rolling_eps")
+def forward_rolling_eps(
+    stock_id: str,
+    years: int = Query(default=5, ge=1, le=20),
+    token: str | None = Query(default=None),
+    x_finmind_token: str | None = Header(default=None, alias="X-FinMind-Token"),
+) -> dict[str, Any]:
+    """Forward Rolling EPS Valuation.
+
+    Projects this year's EPS using recent monthly revenue YoY and the latest
+    quarter's operating margin, then multiplies by historical P/E percentiles
+    (p25 = safety margin, p50 = fair value, p75 = high risk).
+    """
+    import math as _math
+    import numpy as _np
+
+    sid = stock_id.strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="stock_id is required")
+
+    token_resolved = _require_token(token, x_finmind_token)
+    start, _end, today = _compute_month_range(years)
+    start_ext = start - pd.DateOffset(years=4)
+    start_ext_date = date(int(start_ext.year), int(start_ext.month), 1)
+
+    cache_key = build_cache_key(
+        "api_forward_rolling_eps_v1",
+        stock_id=sid,
+        years=str(years),
+        asof=today.isoformat(),
+    )
+    cached = cache.get(cache_key)
+    if cached and "forward_eps" in cached:
+        return {"stock_id": sid, **{k: v for k, v in cached.items() if k != "ts"}}
+
+    try:
+        client = FinMindClient(api_key=token_resolved)
+        warnings_out: list[str] = []
+
+        # --- Revenue YoY (last 3 available months) ---
+        rev_start = date(today.year - 2, today.month, 1)
+        df_rev = client.fetch_month_revenue(sid, rev_start, today)
+        avg_rev_yoy: float | None = None
+        rev_months_used: list[str] = []
+        rev_yoy_values: list[float] = []
+        if not df_rev.empty and "revenue" in df_rev.columns:
+            df_rev = df_rev.copy()
+            df_rev["revenue"] = pd.to_numeric(df_rev["revenue"], errors="coerce")
+            df_rev["month"] = pd.to_datetime(df_rev["month"])
+            df_rev = df_rev.sort_values("month")
+            df_rev["yoy"] = (df_rev["revenue"] / df_rev["revenue"].shift(12) - 1) * 100
+            valid_rev = df_rev.dropna(subset=["yoy", "revenue"])
+            last_rows = valid_rev.tail(3)
+            if len(last_rows) < 1:
+                warnings_out.append("月營收資料不足（需 13 個月以上歷史）")
+            else:
+                if len(last_rows) < 3:
+                    warnings_out.append(f"僅取得 {len(last_rows)} 個月 YoY 資料（不足 3 個月）")
+                for _, r in last_rows.iterrows():
+                    rev_months_used.append(pd.Timestamp(r["month"]).strftime("%Y-%m"))
+                    rev_yoy_values.append(round(float(r["yoy"]), 1))
+                avg_rev_yoy = round(sum(rev_yoy_values) / len(rev_yoy_values), 1)
+
+        # --- Last complete year's annual EPS ---
+        eps_df_raw = client.fetch_financial_statements(sid, start_ext_date, today)
+        last_year_annual_eps: float | None = None
+        last_complete_year: int | None = None
+        if not eps_df_raw.empty:
+            eps_sub = eps_df_raw[eps_df_raw["type"] == "EPS"].copy()
+            if not eps_sub.empty:
+                eps_sub["date"] = pd.to_datetime(eps_sub["date"])
+                eps_sub["year"] = eps_sub["date"].dt.year
+                yearly = (
+                    eps_sub.groupby("year")
+                    .agg(annual_eps=("value", "sum"), cnt=("value", "count"))
+                    .reset_index()
+                )
+                full_years = yearly[yearly["cnt"] >= 4].sort_values("year")
+                if not full_years.empty:
+                    last_complete_year = int(full_years.iloc[-1]["year"])
+                    last_year_annual_eps = round(float(full_years.iloc[-1]["annual_eps"]), 2)
+
+        # --- Operating margins ---
+        margin_start = date(today.year - 3, today.month, 1)
+        df_margins = client.fetch_margin_ratios(sid, margin_start, today)
+        latest_q_op_margin: float | None = None
+        latest_margin_quarter: str | None = None
+        last_year_avg_op_margin: float | None = None
+        margin_factor: float = 1.0
+        margin_factor_capped: bool = False
+
+        if not df_margins.empty and "operating_margin" in df_margins.columns:
+            valid_margins = df_margins[df_margins["operating_margin"].notna()].copy()
+            if not valid_margins.empty:
+                latest_row = valid_margins.iloc[-1]
+                latest_q_op_margin = round(float(latest_row["operating_margin"]), 2)
+                latest_margin_quarter = str(latest_row["quarter_label"])
+
+                if last_complete_year is not None:
+                    # Q4 (December) of last complete year = full-year cumulative margin
+                    ly_q4 = valid_margins[
+                        valid_margins["quarter"].apply(
+                            lambda q: q.startswith(str(last_complete_year)) and q.endswith("-12-31")
+                        )
+                    ]
+                    if not ly_q4.empty:
+                        last_year_avg_op_margin = round(float(ly_q4.iloc[-1]["operating_margin"]), 2)
+                    else:
+                        # Fallback: mean of all margin rows for that year
+                        ly_rows = valid_margins[
+                            valid_margins["quarter"].apply(lambda q: q.startswith(str(last_complete_year)))
+                        ]
+                        if not ly_rows.empty:
+                            last_year_avg_op_margin = round(float(ly_rows["operating_margin"].mean()), 2)
+
+                if last_year_avg_op_margin is not None and last_year_avg_op_margin != 0:
+                    raw_factor = latest_q_op_margin / last_year_avg_op_margin
+                    if raw_factor > 2.0:
+                        margin_factor = 2.0
+                        margin_factor_capped = True
+                    elif raw_factor < 0.5:
+                        margin_factor = 0.5
+                        margin_factor_capped = True
+                    else:
+                        margin_factor = round(raw_factor, 3)
+                elif last_year_avg_op_margin == 0:
+                    warnings_out.append("去年全年營業利益率為零，Margin Factor 設為 1")
+        else:
+            warnings_out.append("無利潤率資料，Margin Factor 設為 1")
+
+        # --- Forward EPS ---
+        forward_eps: float | None = None
+        if last_year_annual_eps is not None and avg_rev_yoy is not None:
+            if last_year_annual_eps <= 0:
+                warnings_out.append("去年全年 EPS 為負或零，前瞻估值不適用")
+            else:
+                forward_eps = round(last_year_annual_eps * (1 + avg_rev_yoy / 100) * margin_factor, 2)
+
+        # --- Historical P/E percentile bands ---
+        pe_low: float | None = None
+        pe_mid: float | None = None
+        pe_high: float | None = None
+        per_start_date = date(today.year - years, today.month, 1)
+        df_per = client.fetch_stock_per(sid, per_start_date, today)
+        if not df_per.empty and "PER" in df_per.columns:
+            valid_per = df_per[df_per["PER"].notna() & (df_per["PER"] > 0)]["PER"].values
+            if len(valid_per) >= 10:
+                pe_low = round(float(_np.percentile(valid_per, 25)), 1)
+                pe_mid = round(float(_np.percentile(valid_per, 50)), 1)
+                pe_high = round(float(_np.percentile(valid_per, 75)), 1)
+            else:
+                warnings_out.append("歷史本益比資料不足，無法計算百分位")
+        else:
+            warnings_out.append("無歷史本益比資料")
+
+        # --- Price targets ---
+        price_low: float | None = None
+        price_mid: float | None = None
+        price_high: float | None = None
+        if forward_eps is not None and forward_eps > 0:
+            if pe_low is not None:
+                price_low = round(forward_eps * pe_low, 0)
+            if pe_mid is not None:
+                price_mid = round(forward_eps * pe_mid, 0)
+            if pe_high is not None:
+                price_high = round(forward_eps * pe_high, 0)
+
+        # --- Current price ---
+        current_price: float | None = None
+        pr_df = client.fetch_stock_price(sid, date(today.year - 1, today.month, 1), today)
+        if not pr_df.empty and "close" in pr_df.columns:
+            valid_pr = pr_df[pr_df["close"].notna()].sort_values("date")
+            if not valid_pr.empty:
+                current_price = float(valid_pr.iloc[-1]["close"])
+
+        def _upside(target: float | None) -> float | None:
+            if target is None or current_price is None or current_price == 0:
+                return None
+            return round((target - current_price) / current_price * 100, 1)
+
+    except FinMindError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    result: dict[str, Any] = {
+        "last_complete_year": last_complete_year,
+        "last_year_annual_eps": last_year_annual_eps,
+        "avg_rev_yoy": avg_rev_yoy,
+        "rev_months_used": rev_months_used,
+        "rev_yoy_values": rev_yoy_values,
+        "latest_margin_quarter": latest_margin_quarter,
+        "latest_q_op_margin": latest_q_op_margin,
+        "last_year_avg_op_margin": last_year_avg_op_margin,
+        "margin_factor": round(margin_factor, 3),
+        "margin_factor_capped": margin_factor_capped,
+        "forward_eps": forward_eps,
+        "pe_low": pe_low,
+        "pe_mid": pe_mid,
+        "pe_high": pe_high,
+        "pe_years": years,
+        "price_low": price_low,
+        "price_mid": price_mid,
+        "price_high": price_high,
+        "current_price": current_price,
+        "upside_low": _upside(price_low),
+        "upside_mid": _upside(price_mid),
+        "upside_high": _upside(price_high),
+        "warnings": warnings_out,
+    }
+    cache.set(cache_key, {"ts": time.time(), **result})
+    return {"stock_id": sid, **result}
+
+
 # ---------------------------------------------------------------------------
 # === Industry-aware exclusions for buy_score criteria ===
 # ---------------------------------------------------------------------------
