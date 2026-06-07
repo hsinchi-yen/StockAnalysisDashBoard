@@ -1027,6 +1027,47 @@ button:active:not(:disabled) { transform: translateY(0); filter: brightness(0.97
   cursor: pointer;
 }
 
+/* ── Forward Rolling EPS Panel ── */
+.fre-assumptions {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 14px;
+  font-size: 13px;
+}
+.fre-row { display: flex; gap: 8px; align-items: baseline; }
+.fre-key { min-width: 150px; color: var(--text-faint); flex-shrink: 0; }
+.fre-val { color: var(--text-primary); }
+
+.fre-price-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.fre-price-cell {
+  border-radius: 8px;
+  padding: 14px 12px;
+  text-align: center;
+  border: 1px solid var(--border);
+}
+.fre-cell-label { font-size: 12px; font-weight: 600; margin-bottom: 4px; }
+.fre-cell-pe    { font-size: 11px; color: var(--text-faint); margin-bottom: 6px; }
+.fre-cell-price { font-size: 20px; font-weight: 700; margin-bottom: 4px; }
+.fre-cell-upside { font-size: 13px; font-weight: 600; }
+
+.fre-green  { background: #d1fae5; border-color: #6ee7b7; }
+.fre-yellow { background: #fef9c3; border-color: #fde68a; }
+.fre-red    { background: #fee2e2; border-color: #fca5a5; }
+
+[data-theme="dark"] .fre-green  { background: #064e3b; border-color: #065f46; }
+[data-theme="dark"] .fre-yellow { background: #451a03; border-color: #78350f; }
+[data-theme="dark"] .fre-red    { background: #450a0a; border-color: #7f1d1d; }
+
+@media (max-width: 480px) {
+  .fre-price-grid { grid-template-columns: 1fr; }
+  .fre-key { min-width: 110px; }
+}
+
 /* Reduce glass blur cost where the user prefers reduced motion/transparency */
 @media (prefers-reduced-transparency: reduce) {
   .card, .tab-nav, .bottom-nav, .signal-card, .trend-narrative,

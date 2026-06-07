@@ -189,6 +189,7 @@ const dashboardState = {
   liquidityRows: [],
   foreignHoldingData: null,
   valuationExtraData: null,
+  forwardRollingEpsData: null,
   latestSnapshot: null,
   // === cache-restored extras ===
   cashRows: [],
@@ -2855,6 +2856,84 @@ function renderValuationExtra(data) {
 }
 
 // ============================================================
+// === Forward Rolling EPS Panel ===
+// ============================================================
+
+function renderForwardRollingEps(data) {
+  clearSkeleton("forwardRollingEpsPanel");
+  const el = $("forwardRollingEpsPanel");
+  if (!el) return;
+
+  if (!data) {
+    el.innerHTML = '<p class="dcf-na">查無前瞻估值資料。</p>';
+    return;
+  }
+
+  function upsideClass(pct) {
+    if (pct === null || pct === undefined) return "val-neutral";
+    return pct >= 0 ? "val-green" : "val-red";
+  }
+  function fmtUpside(pct) {
+    if (pct === null || pct === undefined) return "N/A";
+    const sign = pct >= 0 ? "+" : "";
+    return `${sign}${pct.toFixed(1)}%`;
+  }
+  function fmtPrice(p) {
+    return (p !== null && p !== undefined) ? `NT$ ${formatFloat2(p)}` : "N/A";
+  }
+  function fmtPct(v) {
+    if (v === null || v === undefined) return "N/A";
+    const sign = v >= 0 ? "+" : "";
+    return `${sign}${v.toFixed(1)}%`;
+  }
+
+  const revMonths = (data.rev_months_used || []).join("、");
+  const revYoys = (data.rev_yoy_values || []).map(v => fmtPct(v)).join(" / ");
+  const capNote = data.margin_factor_capped ? " (已限制 0.5×–2.0×)" : "";
+  const warnHtml = (data.warnings || []).length
+    ? `<p class="chart-note" style="color:#b45309;margin-top:6px;">${(data.warnings || []).join("；")}</p>`
+    : "";
+
+  function priceCell(label, pe, price, upside, bgClass) {
+    const peStr = (pe !== null && pe !== undefined) ? `P/E ${formatFloat2(pe)}×` : "P/E N/A";
+    return `
+      <div class="fre-price-cell ${bgClass}">
+        <div class="fre-cell-label">${label}</div>
+        <div class="fre-cell-pe">${peStr}</div>
+        <div class="fre-cell-price">${fmtPrice(price)}</div>
+        <div class="fre-cell-upside ${upsideClass(upside)}">${fmtUpside(upside)}</div>
+      </div>`;
+  }
+
+  const mfVal = data.margin_factor !== null && data.margin_factor !== undefined
+    ? `${data.margin_factor.toFixed(3)}${capNote}` : "N/A";
+  const fwdEpsVal = data.forward_eps !== null && data.forward_eps !== undefined
+    ? `NT$ ${formatFloat2(data.forward_eps)}` : "N/A";
+  const lyEpsVal = data.last_year_annual_eps !== null && data.last_year_annual_eps !== undefined
+    ? `NT$ ${formatFloat2(data.last_year_annual_eps)}` : "N/A";
+
+  el.innerHTML = `
+    <div class="fre-assumptions">
+      <div class="fre-row"><span class="fre-key">使用月份</span><span class="fre-val">${revMonths || "N/A"}</span></div>
+      <div class="fre-row"><span class="fre-key">月營收 YoY</span><span class="fre-val">${revYoys || "N/A"} → 平均 ${data.avg_rev_yoy !== null && data.avg_rev_yoy !== undefined ? fmtPct(data.avg_rev_yoy) : "N/A"}</span></div>
+      <div class="fre-row"><span class="fre-key">利潤率依據</span><span class="fre-val">${data.latest_margin_quarter || "N/A"}：${data.latest_q_op_margin !== null && data.latest_q_op_margin !== undefined ? data.latest_q_op_margin.toFixed(1) + "%" : "N/A"}</span></div>
+      <div class="fre-row"><span class="fre-key">去年全年利潤率 (${data.last_complete_year || "-"})</span><span class="fre-val">${data.last_year_avg_op_margin !== null && data.last_year_avg_op_margin !== undefined ? data.last_year_avg_op_margin.toFixed(1) + "%" : "N/A"}</span></div>
+      <div class="fre-row"><span class="fre-key">Margin Factor</span><span class="fre-val">${mfVal}</span></div>
+      <div class="fre-row"><span class="fre-key">去年全年 EPS</span><span class="fre-val">${lyEpsVal}</span></div>
+      <div class="fre-row"><span class="fre-key">前瞻 EPS（估）</span><span class="fre-val" style="font-weight:700;">${fwdEpsVal}</span></div>
+    </div>
+    <div class="fre-price-grid">
+      ${priceCell("安全邊際", data.pe_low, data.price_low, data.upside_low, "fre-green")}
+      ${priceCell("合理估值", data.pe_mid, data.price_mid, data.upside_mid, "fre-yellow")}
+      ${priceCell("最高風險", data.pe_high, data.price_high, data.upside_high, "fre-red")}
+    </div>
+    ${warnHtml}
+    <p class="chart-note" style="margin-top:10px;">
+      前瞻 EPS ＝ 去年全年 EPS × (1 + 近 3 月平均月營收 YoY) × 利潤率因子。P/E 採近 ${data.pe_years || 5} 年歷史日頻資料 p25 / p50 / p75 百分位。此為輔助估算，非投資建議。
+    </p>`;
+}
+
+// ============================================================
 // === NEW: Investment Signal Card ===
 // ============================================================
 
@@ -2970,6 +3049,7 @@ function rerenderDashboard() {
   plotBvps(dashboardState.liquidityRows, sid);
   if (dashboardState.foreignHoldingData) plotForeignHolding(dashboardState.foreignHoldingData, sid);
   if (dashboardState.valuationExtraData) renderValuationExtra(dashboardState.valuationExtraData);
+  if (dashboardState.forwardRollingEpsData) renderForwardRollingEps(dashboardState.forwardRollingEpsData);
   renderFinancialFeed();
 }
 
@@ -3149,13 +3229,14 @@ async function runQuery() {
   const pLiquidity = fetchJson(`${base}/liquidity?years=${yr}`, token);
   const pForeignHolding = fetchJson(`${base}/foreign_holding?years=${yr}`, token);
   const pValuationExtra = fetchJson(`${base}/valuation_extra?years=${yr}`, token);
+  const pForwardRollingEps = fetchJson(`${base}/forward_rolling_eps?years=${yr}`, token);
   const pBuyScore = fetchJson(`${base}/buy_score`, token);
 
   const allPromises = [
     pLatest, pRevenue, pPrice, pDYield, pDivCash, pVolume, pRoeRoa, pDcf,
     pDebt, pFcf, pFcfQuarterly, pCapitalFormation, pShareholding, pShareholdingSpread,
     pTurnoverDays, pPeRiver, pMargins, pEpsTrend, pLiquidity, pForeignHolding,
-    pValuationExtra, pBuyScore,
+    pValuationExtra, pForwardRollingEps, pBuyScore,
   ];
   let doneCount = 0;
   let hasError = false;
@@ -3488,6 +3569,21 @@ async function runQuery() {
     console.error("valuation_extra:", err);
     const el = $("valuationExtraPanel");
     if (el) el.textContent = "進階估值資料暫不可用：" + err.message;
+    onDone(true);
+  });
+
+  // Forward Rolling EPS — slow, independent
+  pForwardRollingEps.then((data) => {
+    dashboardState.forwardRollingEpsData = data;
+    renderForwardRollingEps(data);
+    onDone();
+  }).catch((err) => {
+    console.error("forward_rolling_eps:", err);
+    const el = $("forwardRollingEpsPanel");
+    if (el) {
+      el.classList.remove("skeleton-section");
+      el.innerHTML = `<p class="dcf-na">前瞻估值資料暫不可用：${err.message}</p>`;
+    }
     onDone(true);
   });
 
