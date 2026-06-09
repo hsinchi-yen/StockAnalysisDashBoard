@@ -2438,6 +2438,10 @@ def buy_score(
     excluded_criteria = _get_industry_exclusions(industry)
 
     # ── Shared data fetching ──────────────────────────────────────────────────
+    # Stagger calls so FinMind's burst limiter is not triggered. Tunable via
+    # BUY_SCORE_FETCH_DELAY env var — raise it if FinMind starts stalling
+    # connections (read timeouts) during a full-pool crawl.
+    _FETCH_DELAY = float(os.environ.get("BUY_SCORE_FETCH_DELAY", "0.4"))  # seconds between FinMind call groups
     fetch_start_ext = date(today.year - 4, today.month, 1)
 
     ni_q: pd.Series = pd.Series(dtype=float)
@@ -2445,13 +2449,16 @@ def buy_score(
     assets_s: pd.Series = pd.Series(dtype=float)
     try:
         ni_q = client.fetch_quarterly_ni(sid, fetch_start_ext, today)
+        time.sleep(_FETCH_DELAY)
         equity_s, assets_s = client.fetch_quarterly_bs_for_roe(sid, fetch_start_ext, today)
+        time.sleep(_FETCH_DELAY)
     except Exception as exc:
         warnings.append(f"roe_data: {exc}")
 
     fcf_rows: list[dict[str, Any]] = []
     try:
         df_fcf, _ = client.fetch_annual_fcf_data(sid, fetch_start_ext, today)
+        time.sleep(_FETCH_DELAY)
         if not df_fcf.empty:
             fcf_rows = df_fcf.to_dict("records")
     except Exception as exc:
@@ -2461,6 +2468,7 @@ def buy_score(
     assets_debt_s: pd.Series = pd.Series(dtype=float)
     try:
         liabilities_s, assets_debt_s = client.fetch_quarterly_bs_liabilities_assets(sid, fetch_start_ext, today)
+        time.sleep(_FETCH_DELAY)
     except Exception as exc:
         warnings.append(f"debt_data: {exc}")
 
@@ -2616,6 +2624,7 @@ def buy_score(
     rev_positive: int = 0
     rev_yoy_values: list[float] = []
     try:
+        time.sleep(_FETCH_DELAY)
         fetch_rev_start = date(today.year - 2, today.month, 1)
         df_rev = client.fetch_month_revenue(sid, fetch_rev_start, today)
         if not df_rev.empty and len(df_rev) >= 15:
@@ -2665,6 +2674,7 @@ def buy_score(
     eps_yoy_values: list[float] = []
     df_eps: pd.DataFrame = pd.DataFrame()
     try:
+        time.sleep(_FETCH_DELAY)
         df_eps = client.fetch_eps_trend(sid, fetch_start_ext, today)
         if not df_eps.empty:
             recent_eps = df_eps.dropna(subset=["eps_yoy"]).tail(3)
@@ -2752,6 +2762,7 @@ def buy_score(
     # respective fetch raises and the except path skips assignment.
     df_margins = pd.DataFrame()
     try:
+        time.sleep(_FETCH_DELAY)
         df_margins = client.fetch_margin_ratios(sid, fetch_start_ext, today)
         if not df_margins.empty:
             valid_gm = df_margins.dropna(subset=["gross_margin"]).sort_values("quarter")
@@ -2810,6 +2821,7 @@ def buy_score(
     inst_10d_net: float | None = None
     inst_5d_net: float | None = None
     try:
+        time.sleep(_FETCH_DELAY)
         inst_start = date(today.year, today.month, 1) - pd.DateOffset(months=1)
         inst_start_date = date(int(inst_start.year), int(inst_start.month), int(inst_start.day))
         df_inst = client.fetch_institutional_investors_buy_sell(sid, inst_start_date, today)
@@ -2847,6 +2859,7 @@ def buy_score(
     per_median: float | None = None
     per_p25: float | None = None
     try:
+        time.sleep(_FETCH_DELAY)
         per_start = date(today.year - 5, today.month, 1)
         df_per = client.fetch_stock_per(sid, per_start, today)
         if not df_per.empty and "PER" in df_per.columns:
@@ -2941,12 +2954,14 @@ def buy_score(
     spread_df = pd.DataFrame()
     inv_data: dict[str, float] | None = None
     try:
+        time.sleep(_FETCH_DELAY)
         spread_df = client.fetch_shareholding_spread(sid, fetch_start_ext, today)
     except Exception as exc:
         _exc_msg = str(exc).lower()
         if "level is register" not in _exc_msg and "sponsor" not in _exc_msg and "user level" not in _exc_msg:
             warnings.append(f"shareholding_spread: {exc}")
     try:
+        time.sleep(_FETCH_DELAY)
         inv_data = client.fetch_inventory_and_revenue_growth(sid, fetch_start_ext, today)
     except Exception as exc:
         warnings.append(f"inventory_growth: {exc}")
@@ -2954,6 +2969,7 @@ def buy_score(
     # Fetch BVPS for R5
     liq_df_risk: pd.DataFrame = pd.DataFrame()
     try:
+        time.sleep(_FETCH_DELAY)
         liq_df_risk = client.fetch_liquidity_ratios(sid, fetch_start_ext, today)
     except Exception as exc:
         warnings.append(f"liq_ratios_risk: {exc}")
@@ -2961,6 +2977,7 @@ def buy_score(
     # Fetch IS data for R6 (interest coverage)
     is_df_risk: pd.DataFrame = pd.DataFrame()
     try:
+        time.sleep(_FETCH_DELAY)
         is_df_risk = client.fetch_financial_statements(sid, fetch_start_ext, today)
     except Exception as exc:
         warnings.append(f"is_data_risk: {exc}")

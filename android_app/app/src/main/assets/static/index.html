@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>台股分析儀表板（FinMind）</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=32" />
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
   </head>
   <body>
@@ -30,15 +30,20 @@
         <form id="queryForm" class="form">
           <label>
             股票代號
-            <input id="stockId" name="stockId" value="2330" autocomplete="off" />
+            <input id="stockId" name="stockId" value="" autocomplete="off" placeholder="例如 2330" />
           </label>
           <label>
             歷史年限
             <select id="years" name="years">
               <option value="1">1 年</option>
+              <option value="2">2 年</option>
               <option value="3" selected>3 年</option>
+              <option value="4">4 年</option>
               <option value="5">5 年</option>
+              <option value="6">6 年</option>
+              <option value="7">7 年</option>
               <option value="8">8 年</option>
+              <option value="9">9 年</option>
               <option value="10">10 年</option>
             </select>
           </label>
@@ -53,6 +58,7 @@
             </div>
           </div>
           <div class="token-actions" style="grid-column:1/-1;">
+            <span id="apiPlanBadge" class="api-plan-badge" title="查剩餘次數後自動偵測方案類型"></span>
             <button id="tokenClear" type="button" class="btn-secondary">清除 Key</button>
             <button id="tokenSave"  type="button" class="btn-secondary">儲存 Key</button>
             <button id="tokenUsage" type="button" class="btn-secondary">查剩餘次數</button>
@@ -116,6 +122,7 @@
           </section>
           <section class="card">
             <h2>法人買賣</h2>
+            <p id="institutionalNote" class="chart-note" style="display:none;"></p>
             <div id="institutional" class="skeleton-section" style="min-height:80px;"></div>
           </section>
         </section>
@@ -127,9 +134,23 @@
           <div id="foreignHoldingChart" class="chart skeleton-section"></div>
         </section>
 
+        <!-- 股本形成 -->
+        <section class="card">
+          <h2>股本形成</h2>
+          <p class="chart-note">歷年累計股本形成結構（億元）：現金增資、盈餘轉增資、其他（公積轉增資等）。最近一年以圓餅圖顯示各項佔比。資料來源：MoneyDJ（支援部分個股）或 FinMind 財報重建（自 2012 年起）。</p>
+          <div id="capitalFormationPanel" class="skeleton-section" style="min-height:80px;"></div>
+        </section>
+
+        <!-- 股東持股結構分佈（集保股權分散，逐週） -->
+        <section class="card">
+          <h2>股東持股結構分佈</h2>
+          <p class="chart-note">集保戶股權分散表（資料來源：FinMind，<strong>逐週</strong>更新）。依持股張數分為 15 個級距，第 1 級為小額散戶、第 15 級為持股逾百萬股的大戶。最近一週以圓餅圖顯示各級距占比，可拖動時間軸觀察歷史變化。</p>
+          <div id="shareholdingSpreadPanel" class="skeleton-section" style="min-height:80px;"></div>
+        </section>
+
         <!-- 董監事持股 -->
         <section class="card">
-          <h2>董監事持股資訊</h2>
+          <h2>董監事 / 外資持股趨勢</h2>
           <p class="chart-note">資料來源：Goodinfo.tw（月度歷史趨勢）。</p>
           <div id="shareholdingTable" class="skeleton-section" style="min-height:80px;"></div>
         </section>
@@ -157,7 +178,7 @@
         <!-- 月營收 YoY 成長率 -->
         <section class="card">
           <h2>月營收 YoY 成長率 (%)</h2>
-          <p class="chart-note">與去年同月相比的成長率。綠色代表正成長，紅色代表衰退。</p>
+          <p class="chart-note">與去年同月相比的成長率。綠色代表正成長，紅色代表衰退；虛線為 3 個月移動平均，呈現整體趨勢方向。</p>
           <div id="revenueYoyChart" class="chart skeleton-section"></div>
         </section>
 
@@ -257,11 +278,21 @@
 
         <section class="card">
           <h2>自由現金流量（歷年）</h2>
-          <p class="chart-note">自由現金流量 = 營業活動現金流量 − 資本支出（取年度 Q4）。</p>
+          <p class="chart-note">自由現金流量 = 營業活動現金流量 − 資本支出（取年度 Q4 全年值）。標示 <code>*</code> 者為當年度尚未結算、以最新一季累計值呈現的部分年度，不納入平均計算。</p>
           <div id="fcfChart" class="chart skeleton-section"></div>
           <details>
             <summary>資料表</summary>
             <div id="fcfTable"></div>
+          </details>
+        </section>
+
+        <section class="card">
+          <h2>自由現金流量（季累積）</h2>
+          <p class="chart-note">每一季為該會計年度的累計值（Q1、上半年、前三季、全年），會在年初歸零重新累計。資料點較歷年圖更密集，依上方年份區間顯示。</p>
+          <div id="fcfQuarterlyChart" class="chart skeleton-section"></div>
+          <details>
+            <summary>資料表</summary>
+            <div id="fcfQuarterlyTable"></div>
           </details>
         </section>
 
@@ -286,6 +317,13 @@
           <h2>多維估值比較</h2>
           <p class="chart-note">Graham Number = √(22.5 × 平均 EPS × 最新 BVPS)；PEG = 本益比 / EPS 3 年 CAGR。</p>
           <div id="valuationExtraPanel" class="skeleton-section" style="min-height:100px;"></div>
+        </section>
+
+        <!-- 前瞻性滾動估值 -->
+        <section class="card">
+          <h2>前瞻性滾動估值 (Forward Rolling EPS)</h2>
+          <p class="chart-note">以近 3 個月月營收 YoY × 最新季度利潤率因子調整去年全年 EPS，再乘以歷史 P/E 百分位，估算未來一年股價區間。</p>
+          <div id="forwardRollingEpsPanel" class="skeleton-section" style="min-height:120px;"></div>
         </section>
 
         <!-- DCF -->
@@ -332,7 +370,7 @@
         <section class="card buy-score-header" id="buyScoreHeader" style="display:none">
           <div class="buy-score-top">
             <div>
-              <div class="buy-score-label">買入評分</div>
+              <div class="buy-score-label">買入評分 <span id="buyScoreIndustryBadge" style="display:none;font-size:11px;font-weight:500;background:var(--bg-faint);border:1px solid var(--border);border-radius:4px;padding:1px 6px;margin-left:6px;color:var(--text-muted);vertical-align:middle;"></span></div>
               <div class="buy-score-total-row">
                 <span id="buyScoreTotal" class="buy-score-number">—</span>
                 <span id="buyScoreDenom" class="buy-score-denom">/24</span>
@@ -403,6 +441,6 @@
       </footer>
     </main>
 
-    <script src="/static/app.js?v=24"></script>
+    <script src="/static/app.js?v=32"></script>
   </body>
 </html>

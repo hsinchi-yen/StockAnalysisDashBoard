@@ -124,7 +124,10 @@ async function fetchJson(url, token) {
       if (detail.includes("timeout") || detail.includes("Read timed out")) {
         detail = "連線 FinMind 或 Goodinfo 時發生逾時。這通常是因為查詢區間較長或平台負載較高，請稍後再試。";
       } else if (detail.includes("quota exceeded") || detail.includes("402")) {
-        detail = "FinMind API 呼叫次數已達上限。請等待免費額度重置後再查詢。";
+        const isPaid = localStorage.getItem(PAID_API_STORAGE_KEY) === "1";
+        detail = isPaid
+          ? "FinMind API 呼叫次數已達本小時上限（6000 次），請稍後再試。"
+          : "FinMind API 呼叫次數已達上限。請等待免費額度重置（每日 UTC 00:00）後再查詢。";
       } else {
         detail = "第三方資料平台暫時無回應或發生錯誤 (" + detail + ")";
       }
@@ -175,6 +178,7 @@ const dashboardState = {
   roeRoaRows: [],
   debtRatioRows: [],
   fcfData: null,
+  fcfQuarterlyData: null,
   dcfData: null,
   shareholdingData: null,
   turnoverDaysRows: [],
@@ -185,12 +189,112 @@ const dashboardState = {
   liquidityRows: [],
   foreignHoldingData: null,
   valuationExtraData: null,
+  forwardRollingEpsData: null,
   latestSnapshot: null,
+  // === cache-restored extras ===
+  cashRows: [],
+  buyScoreData: null,
+  shareholdingSpreadData: null,
 };
 
 // DCF parameter state (preserved across re-queries)
 const dcfState = { g: 0.04, r: 0.08, mos: 0.30 };
 const FINMIND_TOKEN_STORAGE_KEY = "microeco.finmind_api_key";
+const PAID_API_STORAGE_KEY = "microeco.paid_api";
+
+// ── Last-query cache (localStorage) ───────────────────────────────────────────
+// Persists the most recent successful query so the dashboard opens instantly
+// with the previous result instead of auto-querying a hard-coded default stock.
+const QUERY_CACHE_KEY = "microeco.last_query_v1";
+let _cacheSaveTimer = null;
+
+function saveQueryCache(immediate = false) {
+  if (!dashboardState.stockId) return;
+  const write = () => {
+    const payload = {
+      stockId: dashboardState.stockId,
+      years: Number($("years").value) || 3,
+      dcf: { ...dcfState },
+      state: dashboardState,
+      savedAt: Date.now(),
+    };
+    try {
+      localStorage.setItem(QUERY_CACHE_KEY, JSON.stringify(payload));
+    } catch (e) {
+      // Quota exceeded or serialization failure — drop the cache silently.
+      console.warn("saveQueryCache failed:", e);
+      try { localStorage.removeItem(QUERY_CACHE_KEY); } catch {}
+    }
+  };
+  window.clearTimeout(_cacheSaveTimer);
+  if (immediate) { write(); return; }
+  // Debounce: avoid thrashing localStorage during a burst of render callbacks.
+  _cacheSaveTimer = window.setTimeout(write, 1500);
+}
+
+function loadQueryCache() {
+  let payload = null;
+  try {
+    const raw = localStorage.getItem(QUERY_CACHE_KEY);
+    if (!raw) return false;
+    payload = JSON.parse(raw);
+  } catch {
+    return false;
+  }
+  if (!payload || !payload.state || !payload.stockId) return false;
+
+  // Restore inputs
+  $("stockId").value = payload.stockId;
+  if (payload.years) $("years").value = String(payload.years);
+  if (payload.dcf) Object.assign(dcfState, payload.dcf);
+
+  // Restore state object (replace contents in place so references stay valid)
+  Object.keys(dashboardState).forEach((k) => { delete dashboardState[k]; });
+  Object.assign(dashboardState, payload.state);
+
+  restoreFromState();
+
+  const when = payload.savedAt ? new Date(payload.savedAt).toLocaleString("zh-TW", { hour12: false }) : "";
+  setStatus(`已載入上次查詢的快取資料：${payload.stockId}${when ? `（${when}）` : ""}，按「查詢」可更新`);
+  return true;
+}
+
+// Re-render every panel from dashboardState. Each panel is isolated so one
+// missing/old field cannot break the rest of the restore.
+function restoreFromState() {
+  if (!dashboardState.stockId) return;
+  const sid = dashboardState.stockId;
+  const safe = (label, fn) => { try { fn(); } catch (e) { console.warn(`restore ${label}:`, e); } };
+
+  // Core charts / tables (shared with rerenderDashboard)
+  safe("dashboard", () => rerenderDashboard());
+
+  // Latest price + institutional snapshot
+  safe("latest", () => {
+    const latest = dashboardState.latestSnapshot;
+    if (latest) renderLatestSnapshot(latest, sid);
+  });
+  // Revenue / dividend tables
+  safe("revenueTable", () => {
+    const rows = dashboardState.revenueRows || [];
+    if (rows.length) renderTable($("revenueTable"), ["月份", "營收", "MA3", "MA6", "MA12"],
+      rows.map((r) => [r.month || "-",
+        r.revenue == null ? "-" : formatNumber(r.revenue),
+        r.ma_3 == null ? "-" : formatNumber(r.ma_3),
+        r.ma_6 == null ? "-" : formatNumber(r.ma_6),
+        r.ma_12 == null ? "-" : formatNumber(r.ma_12)]));
+  });
+  safe("dividendTable", () => {
+    if ((dashboardState.cashRows || []).length && (dashboardState.priceRows || []).length)
+      renderDividendTable(dashboardState.cashRows, dashboardState.priceRows);
+  });
+  safe("dcf", () => { if (dashboardState.dcfData) renderDcf(dashboardState.dcfData); });
+  safe("capitalFormation", () => { if (dashboardState.capitalFormationData) renderCapitalFormation(dashboardState.capitalFormationData); });
+  safe("shareholding", () => { if (dashboardState.shareholdingData) renderShareholding(dashboardState.shareholdingData); });
+  safe("shareholdingSpread", () => { if (dashboardState.shareholdingSpreadData) renderShareholdingSpread(dashboardState.shareholdingSpreadData); });
+  safe("buyScore", () => { if (dashboardState.buyScoreData) renderBuyScore(dashboardState.buyScoreData); });
+  safe("signalCard", () => renderSignalCard(dashboardState));
+}
 
 let resizeTimer = null;
 
@@ -314,6 +418,18 @@ function requireTokenBeforeQuery() {
   return "";
 }
 
+function bindPaidApiToggle() {
+  // Plan badge is auto-detected from api_request_limit when updateTokenUsage() runs.
+  // Restore badge from last known state so it shows on page load before next quota check.
+  const badge = $("apiPlanBadge");
+  if (!badge) return;
+  const isPaid = localStorage.getItem(PAID_API_STORAGE_KEY) === "1";
+  if (isPaid) {
+    badge.textContent = "SponsorYear";
+    badge.className = "api-plan-badge paid";
+  }
+}
+
 function bindTokenSettings() {
   const tokenInput = $("token");
   const saveBtn = $("tokenSave");
@@ -368,23 +484,39 @@ async function updateTokenUsage(token) {
     const limit = Number.isFinite(limitNum) && limitNum > 0 ? limitNum : 600;
     const rem = Number.isFinite(remNum) && remNum >= 0 ? remNum : Math.max(0, limit - used);
     const pct = limit > 0 ? (rem / limit) * 100 : 0;
-    
-    let color = "#10b981"; // emerald-500 (Green) >= 50
-    if (rem < 20) {
-      color = "#ef4444"; // red-500 (Red) < 20
-    } else if (rem < 50) {
-      color = "#f59e0b"; // amber-500 (Yellow) < 50
+
+    // Auto-detect plan: limit >= 1600 = paid (SponsorYear 6000/hr), else free (600/day)
+    const isPaid = limit >= 1600;
+    // Persist detected plan so fetchJson error messages are consistent
+    localStorage.setItem(PAID_API_STORAGE_KEY, isPaid ? "1" : "0");
+
+    // Update badge
+    const badge = $("apiPlanBadge");
+    if (badge) {
+      badge.textContent = isPaid ? "SponsorYear" : "免費";
+      badge.className = "api-plan-badge " + (isPaid ? "paid" : "free");
     }
-    
+
+    // Warn thresholds: paid → % based (5%/10%); free → absolute (20/50)
+    let color = "#10b981";
+    if (isPaid) {
+      if (pct < 5) color = "#ef4444";
+      else if (pct < 10) color = "#f59e0b";
+    } else {
+      if (rem < 20) color = "#ef4444";
+      else if (rem < 50) color = "#f59e0b";
+    }
+
     const container = $("tokenUsageContainer");
     const bar = $("tokenUsageBar");
     const text = $("tokenUsageText");
-    
+
     if (container && bar && text) {
       container.style.display = "block";
       bar.style.width = `${pct}%`;
       bar.style.backgroundColor = color;
-      text.textContent = `已使用 ${used} 次｜剩餘 ${rem} 次 / ${limit} 次 (${pct.toFixed(1)}%)`;
+      const cycle = isPaid ? "每小時" : "每日";
+      text.textContent = `已使用 ${used} 次｜剩餘 ${rem} 次 / ${limit} 次 (${pct.toFixed(1)}%)（${cycle}）`;
     }
   } catch (e) {
     const container = $("tokenUsageContainer");
@@ -1102,7 +1234,7 @@ function plotFreeCashFlow(data, stockId, years) {
     return;
   }
 
-  const labels = rows.map((r) => String(r.year));
+  const labels = rows.map((r) => r.is_full_year === false ? `${r.year}*` : String(r.year));
   const opcf = rows.map((r) => r.operating_cf !== null ? r.operating_cf / 1000 : null); // convert to 百萬
   const capex = rows.map((r) => r.capex !== null ? -r.capex / 1000 : null); // show as negative bar
   const fcf = rows.map((r) => r.fcf !== null ? r.fcf / 1000 : null);
@@ -1167,7 +1299,7 @@ function plotFreeCashFlow(data, stockId, years) {
   const avgFcf = data.fcf_avg;
   const avgPct = data.fcf_avg_pct_capital;
   const tableRows = [...rows].reverse().map((r) => [
-    String(r.year),
+    r.is_full_year === false ? `${r.quarter_label || r.year}（累計）` : String(r.year),
     formatCF(r.operating_cf),
     formatCF(r.capex),
     formatCF(r.fcf),
@@ -1186,6 +1318,64 @@ function plotFreeCashFlow(data, stockId, years) {
   renderTable(
     $("fcfTable"),
     ["年度", "營業現金流", "資本支出", "自由現金流", "佔股本 %"],
+    tableRows
+  );
+}
+
+// ── NEW: Free Cash Flow (quarterly cumulative) ───────────────────────────────
+
+function plotFreeCashFlowQuarterly(data, stockId, years) {
+  clearSkeleton("fcfQuarterlyChart");
+  const rows = (data && data.rows) || [];
+  const el = $("fcfQuarterlyChart");
+  if (!rows.length) {
+    if (el) el.textContent = "查無季累積自由現金流量資料（需要現金流量表資料）。";
+    return;
+  }
+
+  const labels = rows.map((r) => r.quarter_label);
+  const opcf = rows.map((r) => r.operating_cf !== null ? r.operating_cf / 1000 : null); // 百萬
+  const capex = rows.map((r) => r.capex !== null ? -r.capex / 1000 : null);
+  const fcf = rows.map((r) => r.fcf !== null ? r.fcf / 1000 : null);
+
+  const traces = [
+    {
+      x: labels, y: opcf, type: "bar", name: "營業現金流（累計）",
+      marker: { color: "#3b82f6", opacity: 0.75 },
+      hovertemplate: "%{x}<br>營業CF：%{y:,.1f} M<extra></extra>",
+    },
+    {
+      x: labels, y: capex, type: "bar", name: "資本支出（負）",
+      marker: { color: "#f97316", opacity: 0.75 },
+      hovertemplate: "%{x}<br>資本支出：%{y:,.1f} M<extra></extra>",
+    },
+    {
+      x: labels, y: fcf, type: "scatter", mode: "lines+markers", name: "自由現金流（累計）",
+      line: { color: "#22c55e", width: 2 },
+      marker: { color: "#22c55e", size: 6 },
+      connectgaps: false,
+      hovertemplate: "%{x}<br>自由CF：%{y:,.1f} M<extra></extra>",
+    },
+  ];
+
+  const layout = baseChartLayout(`${stockId} 自由現金流量（季累積，${years}年）`, {
+    margin: isCompactViewport() ? { l: 44, r: 20, t: 48, b: 64 } : { l: 60, r: 30, t: 50, b: 60 },
+    barmode: "group",
+    xaxis: { type: "category", tickangle: -45 },
+    yaxis: { title: "金額（百萬元）", tickformat: ",.0f", zeroline: true },
+  });
+
+  Plotly.newPlot("fcfQuarterlyChart", traces, layout, PLOTLY_CONFIG);
+
+  const tableRows = [...rows].reverse().map((r) => [
+    r.quarter_label,
+    formatCF(r.operating_cf),
+    formatCF(r.capex),
+    formatCF(r.fcf),
+  ]);
+  renderTable(
+    $("fcfQuarterlyTable"),
+    ["季度", "營業現金流（累計）", "資本支出", "自由現金流（累計）"],
     tableRows
   );
 }
@@ -1251,6 +1441,273 @@ function renderDcf(data) {
   `;
 }
 
+// ── 股本形成 (Capital Formation) ──────────────────────────────────────────────
+
+function renderCapitalFormation(data) {
+  const panel = $("capitalFormationPanel");
+  clearSkeleton("capitalFormationPanel");
+  if (!panel) return;
+  panel.innerHTML = "";
+
+  const rows = (data && data.rows) || [];
+  if (!rows.length) {
+    panel.textContent = "查無股本形成資料。";
+    return;
+  }
+
+  if (data.note) {
+    const noteEl = document.createElement("p");
+    noteEl.className = "chart-note";
+    noteEl.style.color = "var(--accent)";
+    noteEl.textContent = data.note;
+    panel.appendChild(noteEl);
+  }
+
+  const years  = rows.map(r => String(r.year));
+  const cash   = rows.map(r => r.cash);
+  const earn   = rows.map(r => r.earnings);
+  const other  = rows.map(r => r.other);
+
+  // Stacked bar chart
+  const barDiv = document.createElement("div");
+  barDiv.className = "chart";
+  barDiv.style.height = "320px";
+  panel.appendChild(barDiv);
+
+  const barTraces = [
+    {
+      x: years, y: cash, name: "現金增資",
+      type: "bar", marker: { color: "#3b82f6" },
+      hovertemplate: "現金增資<br>%{x} 年：%{y:.2f} 億元<extra></extra>",
+    },
+    {
+      x: years, y: earn, name: "盈餘轉增資",
+      type: "bar", marker: { color: "#22c55e" },
+      hovertemplate: "盈餘轉增資<br>%{x} 年：%{y:.2f} 億元<extra></extra>",
+    },
+    {
+      x: years, y: other, name: "其他",
+      type: "bar", marker: { color: "#f59e0b" },
+      hovertemplate: "其他<br>%{x} 年：%{y:.2f} 億元<extra></extra>",
+    },
+  ];
+
+  Plotly.newPlot(
+    barDiv,
+    barTraces,
+    baseChartLayout("累計股本形成結構（億元）", {
+      height: 320,
+      barmode: "stack",
+      xaxis: { title: "年份", type: "category" },
+      yaxis: { title: "累計金額（億元）", rangemode: "tozero" },
+      legend: { orientation: "h", x: 0, y: -0.2 },
+      margin: { l: 60, r: 20, t: 50, b: 60 },
+    }),
+    { ...PLOTLY_CONFIG, responsive: true }
+  );
+
+  // Pie chart for latest year
+  const latest = rows[rows.length - 1];
+  const pieSection = document.createElement("div");
+  pieSection.style.marginTop = "20px";
+
+  const pieTitle = document.createElement("h3");
+  pieTitle.className = "subchart-title";
+  pieTitle.textContent = `最近年度股本結構圓餅圖（${latest.year} 年）`;
+  pieSection.appendChild(pieTitle);
+
+  const pieDiv = document.createElement("div");
+  pieDiv.style.height = "300px";
+  pieSection.appendChild(pieDiv);
+  panel.appendChild(pieSection);
+
+  const pieLabels = ["現金增資", "盈餘轉增資", "其他"];
+  const pieValues = [latest.cash, latest.earnings, latest.other];
+  const pieColors = ["#3b82f6", "#22c55e", "#f59e0b"];
+
+  Plotly.newPlot(
+    pieDiv,
+    [{
+      type: "pie",
+      labels: pieLabels,
+      values: pieValues,
+      marker: { colors: pieColors },
+      textinfo: "percent+label",
+      sort: false,
+      hole: 0.4,
+      hovertemplate: "%{label}<br>%{value:.2f} 億元（%{percent}）<extra></extra>",
+    }],
+    baseChartLayout(`股本結構（${latest.year}）`, {
+      height: 300,
+      margin: { l: 20, r: 20, t: 50, b: 20 },
+      legend: { orientation: "h", x: 0, y: -0.15 },
+    }),
+    { ...PLOTLY_CONFIG, responsive: true }
+  );
+
+  const srcNote = document.createElement("p");
+  srcNote.className = "chart-note";
+  srcNote.style.marginTop = "8px";
+  srcNote.textContent = `資料來源：${data.source || "未知"}。數值為歷年累計（億元）。`;
+  panel.appendChild(srcNote);
+}
+
+// ── NEW: Shareholder structure distribution (集保股權分散，逐週) ──────────────
+
+// 15-step palette: cool blues (小額散戶) → warm reds (大戶).
+const SPREAD_COLORS = [
+  "#0ea5e9", "#22d3ee", "#2dd4bf", "#34d399", "#a3e635",
+  "#fde047", "#fbbf24", "#fb923c", "#f97316", "#f87171",
+  "#ef4444", "#dc2626", "#e11d48", "#be123c", "#9f1239",
+];
+
+function renderShareholdingSpread(data) {
+  const panel = $("shareholdingSpreadPanel");
+  clearSkeleton("shareholdingSpreadPanel");
+  if (!panel) return;
+  panel.innerHTML = "";
+
+  const levels = (data && data.levels) || [];
+  const dates = (data && data.dates) || [];
+  const percent = (data && data.percent) || {};
+
+  if (!dates.length) {
+    panel.textContent = (data && data.error) || "查無集保股權分散資料。";
+    return;
+  }
+
+  // Show TDCC data-source note (non-critical) if backend fell back to scraper
+  if (data && data.error) {
+    const noteEl = document.createElement("p");
+    noteEl.className = "chart-note";
+    noteEl.style.color = "var(--accent)";
+    noteEl.textContent = data.error;
+    panel.appendChild(noteEl);
+  }
+
+  const dark = isDarkMode();
+  const labelOf = (lv) => lv.label;
+
+  // ── Stacked area chart over weekly dates ──────────────────────────────
+  const stackedDiv = document.createElement("div");
+  stackedDiv.className = "chart";
+  stackedDiv.style.height = "320px";
+  panel.appendChild(stackedDiv);
+
+  const traces = levels.map((lv, i) => ({
+    x: dates,
+    y: percent[lv.level] || [],
+    type: "scatter",
+    mode: "lines",
+    stackgroup: "one",
+    name: lv.label,
+    line: { width: 0.5, color: SPREAD_COLORS[i] },
+    fillcolor: SPREAD_COLORS[i],
+    hovertemplate: `${lv.label}<br>%{x}<br>%{y:.2f}%<extra></extra>`,
+  }));
+
+  const isMobile = window.innerWidth < 900;
+  Plotly.newPlot(
+    stackedDiv,
+    traces,
+    baseChartLayout("持股級距占比堆疊（逐週）", {
+      height: isMobile ? 280 : 320,
+      hovermode: "closest",
+      xaxis: { type: "date", tickformat: "%Y/%m", rangeslider: { visible: true, thickness: 0.07 } },
+      yaxis: { title: "占比 (%)", rangemode: "tozero", ticksuffix: "%" },
+      legend: isMobile
+        ? { orientation: "h", x: 0, y: -0.22, font: { size: 9 } }
+        : { orientation: "v", x: 1.02, y: 0.5, font: { size: 10 } },
+      margin: isMobile
+        ? { l: 46, r: 10, t: 40, b: 80 }
+        : { l: 52, r: 160, t: 50, b: 36 },
+    }),
+    { ...PLOTLY_CONFIG, responsive: true }
+  );
+
+  // ── Pie chart for a selected week, driven by a time slider ────────────
+  const pieSection = document.createElement("div");
+  pieSection.style.marginTop = "20px";
+
+  const pieTitle = document.createElement("h3");
+  pieTitle.className = "subchart-title";
+  pieTitle.textContent = "持股結構圓餅圖（拖動時間軸選取週別）";
+  pieSection.appendChild(pieTitle);
+
+  const sliderRow = document.createElement("div");
+  sliderRow.className = "slider-row";
+
+  const slider = document.createElement("input");
+  slider.type = "range";
+  slider.min = "0";
+  slider.max = String(dates.length - 1);
+  slider.value = String(dates.length - 1);
+  slider.className = "time-slider";
+
+  const sliderLabel = document.createElement("span");
+  sliderLabel.className = "slider-label";
+  sliderLabel.textContent = dates[dates.length - 1] || "";
+
+  sliderRow.appendChild(slider);
+  sliderRow.appendChild(sliderLabel);
+  pieSection.appendChild(sliderRow);
+
+  const pieDiv = document.createElement("div");
+  pieDiv.style.height = "340px";
+  pieSection.appendChild(pieDiv);
+  panel.appendChild(pieSection);
+
+  function updatePie(idx) {
+    sliderLabel.textContent = dates[idx] || "";
+    const labels = [];
+    const values = [];
+    const colors = [];
+    levels.forEach((lv, i) => {
+      const v = (percent[lv.level] || [])[idx];
+      if (v != null && !Number.isNaN(v)) {
+        labels.push(labelOf(lv));
+        values.push(v);
+        colors.push(SPREAD_COLORS[i]);
+      }
+    });
+    if (!values.length) {
+      Plotly.purge(pieDiv);
+      pieDiv.textContent = "此週無比例資料";
+      return;
+    }
+    Plotly.react(
+      pieDiv,
+      [{
+        type: "pie",
+        labels,
+        values,
+        marker: { colors },
+        textinfo: "percent",
+        sort: false,
+        direction: "clockwise",
+        hovertemplate: "%{label}<br>%{value:.2f}%<extra></extra>",
+        hole: 0.4,
+      }],
+      baseChartLayout(`持股結構 ${dates[idx] || ""}`, {
+        height: 340,
+        hovermode: "closest",
+        margin: { l: 20, r: 20, t: 50, b: 20 },
+        legend: { orientation: "v", x: 1.0, y: 0.5, font: { size: 10 } },
+      }),
+      { ...PLOTLY_CONFIG, responsive: true }
+    );
+  }
+
+  slider.addEventListener("input", () => updatePie(Number(slider.value)));
+  updatePie(dates.length - 1);
+
+  const note = document.createElement("p");
+  note.className = "chart-note";
+  note.style.marginTop = "8px";
+  note.textContent = "資料來源：FinMind 集保戶股權分散表（逐週）。級距 1 為小額散戶、級距 15 為持股逾百萬股大戶。";
+  panel.appendChild(note);
+}
+
 // ── NEW: Shareholding ────────────────────────────────────────────────────────
 
 function renderShareholding(data) {
@@ -1297,6 +1754,11 @@ function renderShareholding(data) {
   }
 
   const dates = sorted.map((r) => r.date);
+
+  // Theme-aware chart colors (kept in sync with the active light/dark theme).
+  const shDark = isDarkMode();
+  const shBg = shDark ? "#1e293b" : "#ffffff";
+  const shFont = shDark ? "#e2e8f0" : "#374151";
 
   // Helper: extract series, replace null with null (gaps are fine)
   function col(field) {
@@ -1358,8 +1820,8 @@ function renderShareholding(data) {
       yaxis2: { title: "%", overlaying: "y", side: "right", tickformat: ".2f" },
       legend: { orientation: "h", y: 1.15, x: 0, font: { size: 11 } },
       title: { text: "非獨立董監持股", font: { size: 13 }, x: 0.01 },
-      plot_bgcolor: "#1e293b", paper_bgcolor: "#1e293b",
-      font: { color: "#e2e8f0" },
+      plot_bgcolor: shBg, paper_bgcolor: shBg,
+      font: { color: shFont },
     },
     { ...PLOTLY_CONFIG, responsive: true }
   );
@@ -1396,8 +1858,8 @@ function renderShareholding(data) {
       yaxis2: { title: "%", overlaying: "y", side: "right", tickformat: ".2f" },
       legend: { orientation: "h", y: 1.15, x: 0, font: { size: 11 } },
       title: { text: "獨立董監持股", font: { size: 13 }, x: 0.01 },
-      plot_bgcolor: "#1e293b", paper_bgcolor: "#1e293b",
-      font: { color: "#e2e8f0" },
+      plot_bgcolor: shBg, paper_bgcolor: shBg,
+      font: { color: shFont },
     },
     { ...PLOTLY_CONFIG, responsive: true }
   );
@@ -1434,8 +1896,8 @@ function renderShareholding(data) {
       yaxis2: { title: "%", overlaying: "y", side: "right", tickformat: ".2f" },
       legend: { orientation: "h", y: 1.15, x: 0, font: { size: 11 } },
       title: { text: "全體董監持股", font: { size: 13 }, x: 0.01 },
-      plot_bgcolor: "#1e293b", paper_bgcolor: "#1e293b",
-      font: { color: "#e2e8f0" },
+      plot_bgcolor: shBg, paper_bgcolor: shBg,
+      font: { color: shFont },
     },
     { ...PLOTLY_CONFIG, responsive: true }
   );
@@ -1467,8 +1929,8 @@ function renderShareholding(data) {
       yaxis2: { title: "%", overlaying: "y", side: "right", tickformat: ".2f" },
       legend: { orientation: "h", y: 1.15, x: 0, font: { size: 11 } },
       title: { text: "外資持股", font: { size: 13 }, x: 0.01 },
-      plot_bgcolor: "#1e293b", paper_bgcolor: "#1e293b",
-      font: { color: "#e2e8f0" },
+      plot_bgcolor: shBg, paper_bgcolor: shBg,
+      font: { color: shFont },
     },
     { ...PLOTLY_CONFIG, responsive: true }
   );
@@ -1494,8 +1956,8 @@ function renderShareholding(data) {
       yaxis: { title: "張數", tickformat: ",.0f", side: "left" },
       legend: { orientation: "h", y: 1.15, x: 0, font: { size: 11 } },
       title: { text: "【發行張數】", font: { size: 13 }, x: 0.01 },
-      plot_bgcolor: "#1e293b", paper_bgcolor: "#1e293b",
-      font: { color: "#e2e8f0" },
+      plot_bgcolor: shBg, paper_bgcolor: shBg,
+      font: { color: shFont },
     },
     { ...PLOTLY_CONFIG, responsive: true }
   );
@@ -1602,9 +2064,9 @@ function renderShareholding(data) {
         height: 320,
         margin: { l: 20, r: 20, t: 40, b: 20 },
         title: { text: `持股結構 ${r?.date || ""}`, font: { size: 13 }, x: 0.5 },
-        plot_bgcolor: "#1e293b",
-        paper_bgcolor: "#1e293b",
-        font: { color: "#e2e8f0" },
+        plot_bgcolor: shBg,
+        paper_bgcolor: shBg,
+        font: { color: shFont },
         legend: { orientation: "v", x: 1.02, y: 0.5 },
       },
       { ...PLOTLY_CONFIG, responsive: true }
@@ -1919,29 +2381,50 @@ function renderBuyScore(data) {
   const stage2Criteria = data.criteria.filter(c => c.weight === 1);
   const allCriteria = data.criteria;
 
+  // Show industry badge if available
+  const industryBadgeEl = $("buyScoreIndustryBadge");
+  if (industryBadgeEl) {
+    if (data.industry) {
+      industryBadgeEl.textContent = data.industry;
+      industryBadgeEl.style.display = "inline-block";
+    } else {
+      industryBadgeEl.style.display = "none";
+    }
+  }
+
   function criterionHTML(c) {
     let icon, valueClass;
-    if (c.pass === true)  { icon = "✅"; valueClass = "pass"; }
-    else if (c.pass === false) { icon = "❌"; valueClass = "fail"; }
-    else { icon = "⬜"; valueClass = "unknown"; }
+    if (c.not_applicable) {
+      icon = "—"; valueClass = "unknown";
+    } else if (c.pass === true) {
+      icon = "✅"; valueClass = "pass";
+    } else if (c.pass === false) {
+      icon = "❌"; valueClass = "fail";
+    } else {
+      icon = "⬜"; valueClass = "unknown";
+    }
 
     const disabled = (c.pass === null) ? " disabled" : "";
+    const naStyle = c.not_applicable ? " style=\"opacity:0.45\"" : "";
     const weightBadge = c.weight === 2
       ? `<span class="criterion-weight-badge">×2</span>`
       : "";
-    const warning  = c.warning
+    const naTag = c.not_applicable
+      ? `<span style="font-size:10px;color:var(--text-muted);margin-left:6px;">產業不適用</span>`
+      : "";
+    const warning = c.warning && !c.not_applicable
       ? `<div class="criterion-warning">⚠ ${c.warning}</div>`
       : "";
 
     return `
-      <div class="criterion-item${disabled}">
+      <div class="criterion-item${disabled}"${naStyle}>
         <div class="criterion-icon">${icon}</div>
         <div class="criterion-body">
-          <div class="criterion-label">${c.label}${weightBadge}</div>
+          <div class="criterion-label">${c.label}${weightBadge}${naTag}</div>
           <div class="criterion-detail">${c.threshold}</div>
           ${warning}
         </div>
-        <div class="criterion-value ${valueClass}">${c.value_label || "—"}</div>
+        <div class="criterion-value ${valueClass}">${c.not_applicable ? "產業不適用" : (c.value_label || "—")}</div>
       </div>`;
   }
 
@@ -1967,17 +2450,39 @@ function renderBuyScore(data) {
   if (riskCriteria.length > 0 && riskEl && riskContainer) {
     riskEl.style.display = "block";
     if (riskLabel) riskLabel.textContent = `(觸發 ${riskScore} 項警示)`;
-    
-    riskContainer.innerHTML = riskCriteria.map(c => `
-      <div class="criterion-row" style="background:var(--bg-faint);">
-        <div class="criterion-name" style="align-items:center;">
-          <span style="color:#ef4444; margin-right:4px;">●</span> 
-          ${c.name}
-          <div class="criterion-desc" style="margin-left:12px;font-size:11px;color:var(--text-muted)">${c.description}</div>
-        </div>
-        <div class="criterion-value risk-val" style="color:#ef4444; font-weight:600;">${c.value_label}</div>
-      </div>
-    `).join("");
+
+    // Group by category
+    const groups = {};
+    riskCriteria.forEach(c => {
+      const cat = c.category || "其他";
+      if (!groups[cat]) groups[cat] = [];
+      groups[cat].push(c);
+    });
+    const catOrder = ["財務造假", "財務惡化", "籌碼治理", "籌碼排雷", "估值排雷", "品質排雷", "獲利排雷", "存貨排雷", "配息排雷", "其他"];
+    const sortedCats = Object.keys(groups).sort((a, b) => {
+      const ia = catOrder.indexOf(a), ib = catOrder.indexOf(b);
+      return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+    });
+
+    riskContainer.innerHTML = sortedCats.map(cat => {
+      const items = groups[cat];
+      const rows = items.map(c => `
+        <div class="criterion-row" style="background:var(--bg-faint);">
+          <div class="criterion-name" style="align-items:center;">
+            <span style="color:#ef4444; margin-right:4px;">●</span>
+            ${c.name}
+            <div class="criterion-desc" style="margin-left:12px;font-size:11px;color:var(--text-muted)">${c.description}</div>
+          </div>
+          <div class="criterion-value risk-val" style="color:#ef4444; font-weight:600;">${c.value_label}</div>
+        </div>`).join("");
+      return `
+        <div style="margin-top:8px;">
+          <div style="font-size:11px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;padding:4px 0 2px;border-bottom:1px solid var(--border);">
+            ${cat} <span style="font-weight:400;">(${items.length})</span>
+          </div>
+          ${rows}
+        </div>`;
+    }).join("");
   } else if (riskEl) {
     riskEl.style.display = "none";
   }
@@ -2111,33 +2616,66 @@ function plotRevenueYoY(revenueRows, stockId) {
     if (el) el.textContent = "查無營收資料。";
     return;
   }
+  // String-based prev-year key: avoid Date/timezone arithmetic that can shift
+  // "YYYY-MM-01" by one day across the year boundary in UTC+8 hosts.
+  // r.month from backend is "YYYY-MM-DD".
   const byMonth = new Map(revenueRows.map((r) => [r.month, r.revenue]));
+  const prevYearKey = (monthStr) => {
+    if (typeof monthStr !== "string" || monthStr.length < 7) return null;
+    const y = parseInt(monthStr.slice(0, 4), 10);
+    if (!Number.isFinite(y)) return null;
+    return `${y - 1}${monthStr.slice(4)}`;
+  };
+
+  // Keep only months where YoY is computable — matches the original chart's
+  // visible range; pushing the first ~12 months as null made the x-axis stretch
+  // left into empty space and looked broken.
   const rows = [];
   for (const r of revenueRows) {
-    if (r.revenue === null || r.month === null) continue;
-    const thisMonth = new Date(r.month);
-    const prevYear = new Date(thisMonth);
-    prevYear.setFullYear(prevYear.getFullYear() - 1);
-    const prevKey = prevYear.toISOString().slice(0, 7) + "-01";
-    const prevVal = byMonth.get(prevKey);
-    if (prevVal !== null && prevVal !== undefined && prevVal !== 0) {
-      rows.push({ month: r.month, yoy: ((r.revenue - prevVal) / Math.abs(prevVal)) * 100 });
-    }
+    if (r.revenue === null || r.revenue === undefined || r.month === null) continue;
+    const pKey = prevYearKey(r.month);
+    const prevVal = pKey ? byMonth.get(pKey) : undefined;
+    if (prevVal === null || prevVal === undefined || prevVal === 0) continue;
+    rows.push({ month: r.month, yoy: ((r.revenue - prevVal) / Math.abs(prevVal)) * 100 });
   }
   if (rows.length === 0) {
     if (el) el.textContent = "YoY 資料不足（需要至少 13 個月的營收資料）。";
     return;
   }
+
   const x = rows.map((r) => r.month);
   const y = rows.map((r) => r.yoy);
-  const traces = [{
-    x, y, type: "bar", name: "月營收 YoY (%)",
-    marker: { color: y.map((v) => (v >= 0 ? "#10b981" : "#ef4444")) },
-    hovertemplate: "%{x|%Y-%m}<br>YoY：%{y:.1f}%<extra></extra>",
-  }];
+
+  // 3-month trailing MA over the YoY series — trend line is null until the window has 2+ points
+  const ma3 = y.map((_, i) => {
+    const win = y.slice(Math.max(0, i - 2), i + 1);
+    if (win.length < 2) return null;
+    return win.reduce((a, b) => a + b, 0) / win.length;
+  });
+
+  const traces = [
+    {
+      x, y,
+      type: "bar",
+      name: "月營收 YoY (%)",
+      marker: { color: y.map((v) => (v >= 0 ? "#10b981" : "#ef4444")) },
+      hovertemplate: "%{x|%Y-%m}<br>YoY：%{y:.1f}%<extra></extra>",
+    },
+    {
+      x, y: ma3,
+      type: "scatter",
+      mode: "lines+markers",
+      name: "YoY 3 個月趨勢線",
+      line: { color: isDarkMode() ? "#e2e8f0" : "#1f2937", width: 2, dash: "dot" },
+      marker: { size: 4, color: isDarkMode() ? "#e2e8f0" : "#1f2937" },
+      connectgaps: false,
+      hovertemplate: "%{x|%Y-%m}<br>YoY MA3：%{y:.1f}%<extra></extra>",
+    },
+  ];
   const layout = baseChartLayout(`${stockId} 月營收 YoY 成長率`, {
     xaxis: { tickformat: "%Y-%m" },
     yaxis: { title: "YoY (%)", tickformat: ".1f", zeroline: true },
+    legend: { orientation: "h", x: 0, y: 1.12 },
   });
   Plotly.newPlot("revenueYoyChart", traces, layout, PLOTLY_CONFIG);
 }
@@ -2303,8 +2841,8 @@ function renderValuationExtra(data) {
       </div>
       <div class="val-item">
         <div class="val-label">PEG 比率</div>
-        <div class="val-value ${pegColor(peg)}">${peg !== null ? formatFloat2(peg) : "N/A"}</div>
-        <div class="val-detail">PER ${per !== null ? formatFloat2(per) : "-"} ÷ EPS CAGR ${cagr !== null ? formatFloat2(cagr) + "%" : "-"}</div>
+        <div class="val-value ${pegColor(peg)}">${peg !== null ? formatFloat2(peg) : (cagr !== null && cagr <= 0 ? "EPS衰退" : "N/A")}</div>
+        <div class="val-detail">PER ${per !== null ? formatFloat2(per) : "-"} ÷ EPS 3年CAGR ${cagr !== null && cagr > 0 ? formatFloat2(cagr) + "%" : (cagr !== null ? "衰退，PEG無參考意義" : "-")}</div>
       </div>
       <div class="val-item">
         <div class="val-label">5年平均 EPS</div>
@@ -2319,6 +2857,126 @@ function renderValuationExtra(data) {
     </div>
     <p class="chart-note" style="margin-top:10px;">
       PEG &lt; 1 代表成長被低估；PEG &gt; 2 代表成長已充分定價。Graham Number 僅適用於有獲利的傳統產業股。
+    </p>`;
+}
+
+// ============================================================
+// === Forward Rolling EPS Panel ===
+// ============================================================
+
+function renderForwardRollingEps(data) {
+  clearSkeleton("forwardRollingEpsPanel");
+  const el = $("forwardRollingEpsPanel");
+  if (!el) return;
+
+  if (!data) {
+    el.innerHTML = '<p class="dcf-na">查無前瞻估值資料。</p>';
+    return;
+  }
+
+  function upsideClass(pct) {
+    if (pct === null || pct === undefined) return "val-neutral";
+    return pct >= 0 ? "val-green" : "val-red";
+  }
+  function fmtUpside(pct) {
+    if (pct === null || pct === undefined) return "N/A";
+    return `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`;
+  }
+  function fmtPrice(p) {
+    return (p !== null && p !== undefined) ? `NT$ ${formatFloat2(p)}` : "N/A";
+  }
+  function fmtPct(v) {
+    if (v === null || v === undefined) return "N/A";
+    return `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`;
+  }
+  function fmtVal(v, suffix = "") {
+    return (v !== null && v !== undefined) ? `${formatFloat2(v)}${suffix}` : "N/A";
+  }
+
+  function priceCell(label, pe, price, upside, bgClass) {
+    const peStr = (pe !== null && pe !== undefined) ? `P/E ${formatFloat2(pe)}×` : "P/E N/A";
+    return `
+      <div class="fre-price-cell ${bgClass}">
+        <div class="fre-cell-label">${label}</div>
+        <div class="fre-cell-pe">${peStr}</div>
+        <div class="fre-cell-price">${fmtPrice(price)}</div>
+        <div class="fre-cell-upside ${upsideClass(upside)}">${fmtUpside(upside)}</div>
+      </div>`;
+  }
+
+  // ── Shared inputs ──────────────────────────────────────────────────────────
+  const revMonths   = (data.rev_months_used || []).join("、");
+  const revYoys     = (data.rev_yoy_values  || []).map(v => fmtPct(v)).join(" / ");
+  const avgYoyStr   = data.avg_rev_yoy !== null && data.avg_rev_yoy !== undefined ? fmtPct(data.avg_rev_yoy) : "N/A";
+  const lyEps       = data.last_year_annual_eps;
+  const lyEpsStr    = lyEps !== null && lyEps !== undefined ? `NT$ ${formatFloat2(lyEps)}` : "N/A";
+
+  // ── Method 1: 營業利益率調整 ───────────────────────────────────────────────
+  const m1Cap   = data.margin_factor_capped ? " ⚠️已限制" : "";
+  const m1Mf    = data.margin_factor !== null && data.margin_factor !== undefined ? `${data.margin_factor.toFixed(3)}${m1Cap}` : "N/A";
+  const m1Eps   = data.forward_eps   !== null && data.forward_eps   !== undefined ? `NT$ ${formatFloat2(data.forward_eps)}`   : "N/A";
+  const m1OpNow = data.latest_q_op_margin !== null && data.latest_q_op_margin !== undefined ? `${data.latest_q_op_margin.toFixed(1)}%` : "N/A";
+  const m1OpLy  = data.last_year_avg_op_margin !== null && data.last_year_avg_op_margin !== undefined ? `${data.last_year_avg_op_margin.toFixed(1)}%` : "N/A";
+
+  // ── Method 2: 稅後淨利率調整 ──────────────────────────────────────────────
+  const m2Cap   = data.net_margin_factor_capped ? " ⚠️已限制" : "";
+  const m2Mf    = data.net_margin_factor !== null && data.net_margin_factor !== undefined ? `${data.net_margin_factor.toFixed(3)}${m2Cap}` : "N/A";
+  const m2Eps   = data.forward_eps_m2   !== null && data.forward_eps_m2   !== undefined ? `NT$ ${formatFloat2(data.forward_eps_m2)}`   : "N/A";
+  const m2NmNow = data.latest_q_net_margin !== null && data.latest_q_net_margin !== undefined ? `${data.latest_q_net_margin.toFixed(1)}%` : "N/A";
+  const m2NmLy  = data.last_year_q4_net_margin !== null && data.last_year_q4_net_margin !== undefined ? `${data.last_year_q4_net_margin.toFixed(1)}%` : "N/A";
+
+  const warnHtml = (data.warnings || []).length
+    ? `<p class="chart-note" style="color:#b45309;margin-top:8px;">${(data.warnings || []).join("；")}</p>`
+    : "";
+
+  el.innerHTML = `
+    <!-- 共用假設 -->
+    <div class="fre-assumptions">
+      <div class="fre-row"><span class="fre-key">YoY 月份</span><span class="fre-val">${revMonths || "N/A"}</span></div>
+      <div class="fre-row"><span class="fre-key">月營收 YoY</span><span class="fre-val">${revYoys || "N/A"} → 平均 ${avgYoyStr}</span></div>
+      <div class="fre-row"><span class="fre-key">去年全年 EPS（${data.last_complete_year || "-"}）</span><span class="fre-val">${lyEpsStr}</span></div>
+    </div>
+
+    <!-- 方法一 -->
+    <div class="fre-method-header">
+      <span class="fre-method-badge fre-badge-m1">方法一</span>
+      EPS 成長調整法
+      <span class="fre-method-sub">以營業利益率推估前瞻 EPS</span>
+    </div>
+    <div class="fre-method-detail">
+      <span>最新季營業利益率：<b>${m1OpNow}</b>（${data.latest_margin_quarter || "-"}）</span>
+      <span>去年全年：<b>${m1OpLy}</b></span>
+      <span>Factor：<b>${m1Mf}</b></span>
+      <span>→ 前瞻 EPS：<b>${m1Eps}</b></span>
+    </div>
+    <div class="fre-price-grid">
+      ${priceCell("安全邊際", data.pe_low,  data.price_low,  data.upside_low,  "fre-green")}
+      ${priceCell("合理估值", data.pe_mid,  data.price_mid,  data.upside_mid,  "fre-yellow")}
+      ${priceCell("最高風險", data.pe_high, data.price_high, data.upside_high, "fre-red")}
+    </div>
+
+    <!-- 方法二 -->
+    <div class="fre-method-header" style="margin-top:16px;">
+      <span class="fre-method-badge fre-badge-m2">方法二</span>
+      淨利率直推法
+      <span class="fre-method-sub">以稅後淨利率直接推估前瞻 EPS（較樂觀）</span>
+    </div>
+    <div class="fre-method-detail">
+      <span>最新季稅後淨利率：<b>${m2NmNow}</b>（${data.latest_margin_quarter || "-"}）</span>
+      <span>去年全年：<b>${m2NmLy}</b></span>
+      <span>Factor：<b>${m2Mf}</b></span>
+      <span>→ 前瞻 EPS：<b>${m2Eps}</b></span>
+    </div>
+    <div class="fre-price-grid">
+      ${priceCell("安全邊際", data.pe_low,    data.price_low_m2,  data.upside_low_m2,  "fre-green fre-m2")}
+      ${priceCell("合理估值", data.pe_mid,    data.price_mid_m2,  data.upside_mid_m2,  "fre-yellow fre-m2")}
+      ${priceCell("最高風險", data.pe_high,   data.price_high_m2, data.upside_high_m2, "fre-red fre-m2")}
+    </div>
+
+    ${warnHtml}
+    <p class="chart-note" style="margin-top:10px;">
+      兩種方法皆為：去年全年 EPS × (1 + 近 3 月平均月營收 YoY) × 利潤率因子。差異在於方法一用<b>營業利益率</b>、方法二用<b>稅後淨利率</b>。
+      P/E 採近 ${data.pe_years || 5} 年歷史日頻資料 p25 / p50 / p75 百分位。此為輔助估算，非投資建議。
     </p>`;
 }
 
@@ -2426,6 +3084,7 @@ function rerenderDashboard() {
   plotRoeRoa(dashboardState.roeRoaRows, sid);
   plotDebtRatio(dashboardState.debtRatioRows, sid);
   if (dashboardState.fcfData) plotFreeCashFlow(dashboardState.fcfData, sid, years);
+  if (dashboardState.fcfQuarterlyData) plotFreeCashFlowQuarterly(dashboardState.fcfQuarterlyData, sid, years);
   if (dashboardState.turnoverDaysRows && dashboardState.turnoverDaysRows.length > 0) plotTurnoverDays(dashboardState.turnoverDaysRows, sid);
   if (dashboardState.peRiverData) plotPERiver(dashboardState.peRiverData, sid);
   renderTrendSummary(dashboardState.revenueRows, dashboardState.priceRows, dashboardState.dividendYieldRows);
@@ -2437,6 +3096,7 @@ function rerenderDashboard() {
   plotBvps(dashboardState.liquidityRows, sid);
   if (dashboardState.foreignHoldingData) plotForeignHolding(dashboardState.foreignHoldingData, sid);
   if (dashboardState.valuationExtraData) renderValuationExtra(dashboardState.valuationExtraData);
+  if (dashboardState.forwardRollingEpsData) renderForwardRollingEps(dashboardState.forwardRollingEpsData);
   renderFinancialFeed();
 }
 
@@ -2493,6 +3153,66 @@ function hookDcfRecalc() {
   });
 }
 
+// ── Latest price + institutional snapshot (shared by query & cache-restore) ──
+function renderLatestSnapshot(latest, stockId) {
+  clearSkeleton("latestPrice");
+  clearSkeleton("institutional");
+  const stockName = (latest && latest.stock_name) || "";
+  const titleEl = $("latestPriceTitle");
+  if (titleEl) titleEl.textContent = `${stockId}${stockName ? " " + stockName : ""} 最新股價`;
+
+  const p = (latest && latest.price) || {};
+  renderMetrics($("latestPrice"), [
+    { key: "日期", value: p.date || "-" },
+    { key: "開盤", value: formatFloat2(p.open) },
+    { key: "最高", value: formatFloat2(p.high) },
+    { key: "最低", value: formatFloat2(p.low) },
+    { key: "收盤", value: formatFloat2(p.close) },
+    { key: "漲跌", value: formatFloat2(p.spread) },
+    { key: "成交量", value: formatNumber(p.volume) },
+    { key: "成交金額", value: formatNumber(p.money) },
+    { key: "成交筆數", value: formatNumber(p.turnover) },
+  ]);
+
+  const inst = (latest && latest.institutional) || [];
+  const instStatus = (latest && latest.institutional_status) || (inst.length ? "fresh" : "unavailable");
+  const instAsOf = (latest && latest.institutional_as_of) || null;
+  const instLag = Number((latest && latest.institutional_lag_days) || 0);
+  const noteEl = $("institutionalNote");
+  if (noteEl) {
+    let noteText = "";
+    let noteClass = "chart-note";
+    if (instStatus === "fresh" && instAsOf) {
+      noteText = `資料截至 ${instAsOf}`;
+    } else if (instStatus === "stale" && instAsOf) {
+      noteText = `資料截至 ${instAsOf}（延遲 ${instLag} 個交易日，T86 尚未更新最新交易日）`;
+      noteClass = "chart-note chart-note-warn";
+    } else if (instStatus === "unavailable") {
+      noteText = "法人資料尚未公布（TWSE T86 通常於盤後 15:30 後釋出，FinMind 同步可能再延遲數分鐘）。";
+      noteClass = "chart-note chart-note-warn";
+    }
+    if (noteText) {
+      noteEl.textContent = noteText;
+      noteEl.className = noteClass;
+      noteEl.style.display = "";
+    } else {
+      noteEl.style.display = "none";
+    }
+  }
+  if (inst.length === 0) {
+    $("institutional").textContent =
+      instStatus === "unavailable"
+        ? "法人買賣資料尚未公布，請於盤後 16:30 後重新查詢。"
+        : "查無法人買賣資訊。";
+  } else {
+    renderTable(
+      $("institutional"),
+      ["類別", "買進", "賣出", "買賣超"],
+      inst.map((row) => [row.category, formatNumber(row.buy), formatNumber(row.sell), formatNumber(row.net)])
+    );
+  }
+}
+
 // ── Main query ───────────────────────────────────────────────────────────────
 
 async function runQuery() {
@@ -2514,8 +3234,10 @@ async function runQuery() {
   showSkeleton("buyScoreSkeleton");
   showSkeleton("debtRatioChart");
   showSkeleton("fcfChart");
+  showSkeleton("fcfQuarterlyChart");
   showSkeleton("dcfResult");
   showSkeleton("shareholdingTable");
+  showSkeleton("shareholdingSpreadPanel");
   showSkeleton("turnoverDaysChart");
   showSkeleton("peRiverChart");
   showSkeleton("marginsChart");
@@ -2542,7 +3264,10 @@ async function runQuery() {
   const pDcf = fetchJson(`${base}/dcf?years=${yr}&growth_rate=${g}&discount_rate=${r}&margin_of_safety=${mos}`, token);
   const pDebt = fetchJson(`${base}/debt_ratio?years=${yr}`, token);
   const pFcf = fetchJson(`${base}/free_cash_flow?years=${yr}`, token);
+  const pFcfQuarterly = fetchJson(`${base}/free_cash_flow_quarterly?years=${yr}`, token);
+  const pCapitalFormation = fetchJson(`${base}/capital_formation`, token);
   const pShareholding = fetchJson(`${base}/shareholding`, token);
+  const pShareholdingSpread = fetchJson(`${base}/shareholding_spread?years=${yr}`, token);
   const pTurnoverDays = fetchJson(`${base}/turnover_days?years=${yr}`, token);
   const pPeRiver = fetchJson(`${base}/pe_river?years=${yr}`, token);
   // New financial indicator endpoints
@@ -2551,13 +3276,14 @@ async function runQuery() {
   const pLiquidity = fetchJson(`${base}/liquidity?years=${yr}`, token);
   const pForeignHolding = fetchJson(`${base}/foreign_holding?years=${yr}`, token);
   const pValuationExtra = fetchJson(`${base}/valuation_extra?years=${yr}`, token);
+  const pForwardRollingEps = fetchJson(`${base}/forward_rolling_eps?years=${yr}`, token);
   const pBuyScore = fetchJson(`${base}/buy_score`, token);
 
   const allPromises = [
     pLatest, pRevenue, pPrice, pDYield, pDivCash, pVolume, pRoeRoa, pDcf,
-    pDebt, pFcf, pShareholding, pTurnoverDays, pPeRiver,
-    pMargins, pEpsTrend, pLiquidity, pForeignHolding, pValuationExtra,
-    pBuyScore,
+    pDebt, pFcf, pFcfQuarterly, pCapitalFormation, pShareholding, pShareholdingSpread,
+    pTurnoverDays, pPeRiver, pMargins, pEpsTrend, pLiquidity, pForeignHolding,
+    pValuationExtra, pForwardRollingEps, pBuyScore,
   ];
   let doneCount = 0;
   let hasError = false;
@@ -2572,6 +3298,8 @@ async function runQuery() {
       setStatus(`完成：${stockId}（${years} 年）`);
       progressDone(hasError);
       renderSignalCard(dashboardState);
+      // Persist this successful query so the next open restores it instantly.
+      saveQueryCache();
     } else {
       setStatus(`查詢中… ${doneCount}/${allPromises.length}`);
     }
@@ -2580,36 +3308,8 @@ async function runQuery() {
   // ── Group 1: fast core data ────────────────────────────────────────────────
   // Render latest price & institutional immediately when ready
   pLatest.then((latest) => {
-    clearSkeleton("latestPrice");
-    clearSkeleton("institutional");
-    const stockName = (latest && latest.stock_name) || "";
-    const titleEl = $("latestPriceTitle");
-    if (titleEl) titleEl.textContent = `${stockId}${stockName ? " " + stockName : ""} 最新股價`;
-
-    const p = latest.price || {};
     dashboardState.latestSnapshot = latest;
-    renderMetrics($("latestPrice"), [
-      { key: "日期", value: p.date || "-" },
-      { key: "開盤", value: formatFloat2(p.open) },
-      { key: "最高", value: formatFloat2(p.high) },
-      { key: "最低", value: formatFloat2(p.low) },
-      { key: "收盤", value: formatFloat2(p.close) },
-      { key: "漲跌", value: formatFloat2(p.spread) },
-      { key: "成交量", value: formatNumber(p.volume) },
-      { key: "成交金額", value: formatNumber(p.money) },
-      { key: "成交筆數", value: formatNumber(p.turnover) },
-    ]);
-
-    const inst = latest.institutional || [];
-    if (inst.length === 0) {
-      $("institutional").textContent = "查無法人買賣資訊。";
-    } else {
-      renderTable(
-        $("institutional"),
-        ["類別", "買進", "賣出", "買賣超"],
-        inst.map((row) => [row.category, formatNumber(row.buy), formatNumber(row.sell), formatNumber(row.net)])
-      );
-    }
+    renderLatestSnapshot(latest, stockId);
     renderFinancialFeed();
     onDone();
   }).catch((err) => {
@@ -2623,6 +3323,7 @@ async function runQuery() {
     dashboardState.stockId = stockId;
     dashboardState.revenueRows = rows;
     plotRevenue(rows, stockId);
+    plotRevenueYoY(rows, stockId);
     renderTable(
       $("revenueTable"),
       ["月份", "營收", "MA3", "MA6", "MA12"],
@@ -2769,6 +3470,34 @@ async function runQuery() {
     onDone();
   });
 
+  // FCF quarterly cumulative — slow, independent
+  pFcfQuarterly.then((data) => {
+    dashboardState.fcfQuarterlyData = data;
+    plotFreeCashFlowQuarterly(data, stockId, years);
+    onDone();
+  }).catch((err) => {
+    console.error("fcf_quarterly:", err);
+    const el = $("fcfQuarterlyChart");
+    if (el) {
+      el.classList.remove("skeleton-section");
+      el.textContent = "季累積現金流量資料載入失敗: " + err.message;
+    }
+    onDone();
+  });
+
+  // Capital formation — independent
+  pCapitalFormation.then((data) => {
+    dashboardState.capitalFormationData = data;
+    renderCapitalFormation(data);
+    onDone();
+  }).catch((err) => {
+    console.error("capital_formation:", err);
+    clearSkeleton("capitalFormationPanel");
+    const el = $("capitalFormationPanel");
+    if (el) el.textContent = "股本形成資料暫不可用：" + err.message;
+    onDone();
+  });
+
   // Shareholding — slow, independent
   pShareholding.then((data) => {
     dashboardState.shareholdingData = data;
@@ -2781,6 +3510,19 @@ async function runQuery() {
       el.classList.remove("skeleton-section");
       el.textContent = "董監事持股資料暫不可用";
     }
+    onDone();
+  });
+
+  // Shareholder structure distribution (集保股權分散) — slow, independent
+  pShareholdingSpread.then((data) => {
+    dashboardState.shareholdingSpreadData = data;
+    renderShareholdingSpread(data);
+    onDone();
+  }).catch((err) => {
+    console.error("shareholding_spread:", err);
+    clearSkeleton("shareholdingSpreadPanel");
+    const el = $("shareholdingSpreadPanel");
+    if (el) el.textContent = "股東持股結構分佈資料暫不可用：" + err.message;
     onDone();
   });
 
@@ -2877,7 +3619,23 @@ async function runQuery() {
     onDone(true);
   });
 
+  // Forward Rolling EPS — slow, independent
+  pForwardRollingEps.then((data) => {
+    dashboardState.forwardRollingEpsData = data;
+    renderForwardRollingEps(data);
+    onDone();
+  }).catch((err) => {
+    console.error("forward_rolling_eps:", err);
+    const el = $("forwardRollingEpsPanel");
+    if (el) {
+      el.classList.remove("skeleton-section");
+      el.innerHTML = `<p class="dcf-na">前瞻估值資料暫不可用：${err.message}</p>`;
+    }
+    onDone(true);
+  });
+
   pBuyScore.then((data) => {
+    dashboardState.buyScoreData = data;
     renderBuyScore(data);
     onDone();
   }).catch((err) => {
@@ -2904,12 +3662,35 @@ window.addEventListener("resize", () => {
 // Hook DCF recalculate button
 hookDcfRecalc();
 bindTokenSettings();
+bindPaidApiToggle();
 initTabs();
 initTheme();
 initQuickActions();
 initOneHandControls();
 
-// Auto-run only when saved key exists
-if (getSavedToken()) {
-  runQuery();
-}
+// On open: restore the last successful query from localStorage instead of
+// auto-querying a hard-coded default stock. If no cache exists, show a welcome
+// empty state and wait for the user to query.
+(function bootInitialData() {
+  const restored = loadQueryCache();
+  if (!restored) {
+    // No cached query: stop the initial skeleton shimmers so the page reads as
+    // an idle welcome state rather than a perpetual loading screen.
+    document.querySelectorAll(".skeleton-section").forEach((el) => {
+      el.classList.remove("skeleton-section");
+    });
+    const hint = $("shareholdingSpreadPanel");
+    if (hint && !hint.textContent.trim()) {
+      hint.innerHTML = '<p class="chart-note" style="margin:0;">輸入股票代號並按「查詢」即可載入分析資料。系統會記住您最後一次查詢，下次開啟時自動顯示。</p>';
+    }
+    setStatus("輸入股票代號後按「查詢」開始分析");
+  }
+})();
+
+// Flush the latest query to localStorage before the tab is hidden/closed so the
+// most recent result is always available on next open. (JS cannot run after the
+// page is fully closed, so we persist at the last reliable lifecycle hook.)
+window.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") saveQueryCache(true);
+});
+window.addEventListener("pagehide", () => saveQueryCache(true));

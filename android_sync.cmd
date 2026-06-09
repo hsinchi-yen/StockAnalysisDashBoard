@@ -12,7 +12,7 @@ if not exist "%ANDROID_DIR%" (
 )
 
 echo Syncing Python source files...
-for %%f in (api.py cache.py datasource_finmind.py datasource_goodinfo.py datasource_mops.py series_builder.py charts.py android_launcher.py) do (
+for %%f in (api.py cache.py datasource_finmind.py datasource_goodinfo.py datasource_mops.py datasource_tdcc.py datasource_moneydj.py series_builder.py android_launcher.py) do (
   if exist "%ROOT%%%f" (
     copy /Y "%ROOT%%%f" "%PYTHON_DST%\%%f" >nul
     echo   [OK] %%f

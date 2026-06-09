@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import random
+import time
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Optional
@@ -11,6 +13,17 @@ import requests
 
 
 FINMIND_API = "https://api.finmindtrade.com/api/v4/data"
+
+# FinMind throttles by stalling the TCP connection (so requests fail with a
+# read timeout) rather than returning HTTP 429. A single 3 s back-off is not
+# enough to clear the rate-limit window, so we retry several times with an
+# exponential, jittered back-off. All knobs are env-tunable for slow networks
+# or aggressive batch crawls.
+_FINMIND_MAX_RETRIES = int(os.environ.get("FINMIND_MAX_RETRIES", "3"))
+_FINMIND_BACKOFF_BASE = float(os.environ.get("FINMIND_BACKOFF_BASE", "3.0"))
+_FINMIND_BACKOFF_MAX = float(os.environ.get("FINMIND_BACKOFF_MAX", "30.0"))
+# HTTP statuses worth retrying (transient throttle / upstream hiccups).
+_FINMIND_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 # FinMind TaiwanStockHoldingSharesPer returns descriptive strings for HoldingSharesLevel.
 # Map them to canonical numeric codes "1"–"15" used throughout this project.
@@ -45,10 +58,43 @@ class FinMindClient:
     default_timeout: float = field(
         default_factory=lambda: float(os.environ.get("MICROECO_FINMIND_TIMEOUT", "30"))
     )
+    # Per-request-session cache: deduplicates repeated fetches of the same dataset
+    # (e.g. TaiwanStockBalanceSheet is used by 5+ methods in buy_score).
+    _ds_cache: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.session is None:
             self.session = requests.Session()
+
+    def _session_get_retry(
+        self, params: dict, timeout: float, retries: int
+    ) -> requests.Response:
+        """GET FINMIND_API, retrying timeouts and transient HTTP errors.
+
+        FinMind's rate limiter stalls connections instead of returning 429, so a
+        read timeout is the dominant throttle signal. We widen the back-off on
+        each attempt (3s, 6s, 12s … capped at _FINMIND_BACKOFF_MAX) so the
+        rate-limit window can reset, and add jitter so concurrent crawls don't
+        retry in lock-step. The final attempt re-raises / returns as-is.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(1 + retries):
+            try:
+                r = self.session.get(FINMIND_API, params=params, timeout=timeout)
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+                last_exc = exc
+                if attempt >= retries:
+                    raise
+            else:
+                if r.status_code not in _FINMIND_RETRY_STATUSES or attempt >= retries:
+                    return r
+                last_exc = None
+            backoff = min(_FINMIND_BACKOFF_BASE * (2 ** attempt), _FINMIND_BACKOFF_MAX)
+            time.sleep(backoff + random.uniform(0.0, 1.0))
+        # Loop always returns or raises above; this satisfies type checkers.
+        if last_exc is not None:
+            raise last_exc
+        raise FinMindError("FinMind request failed after retries")
 
     def _get_dataset(
         self,
@@ -58,9 +104,17 @@ class FinMindClient:
         start_date: date,
         end_date: date,
         timeout: float = 0,
+        _retry: int = _FINMIND_MAX_RETRIES,
     ) -> list[dict]:
         if timeout <= 0:
             timeout = self.default_timeout
+
+        # Deduplicate: same (dataset, stock, start, end) within one client instance
+        # avoids re-fetching e.g. TaiwanStockBalanceSheet 5 times in buy_score.
+        _cache_key = (dataset, stock_id, start_date.isoformat(), end_date.isoformat())
+        if _cache_key in self._ds_cache:
+            return self._ds_cache[_cache_key]
+
         params = {
             "dataset": dataset,
             "data_id": stock_id,
@@ -70,7 +124,7 @@ class FinMindClient:
         if self.api_key:
             params["token"] = self.api_key
 
-        r = self.session.get(FINMIND_API, params=params, timeout=timeout)
+        r = self._session_get_retry(params, timeout, _retry)
 
         # FinMind returns HTTP 400 {"msg":"Token is illegal."} when the token is
         # a website session JWT (no `exp`) instead of an API-login-issued JWT.
@@ -82,7 +136,7 @@ class FinMindClient:
                 msg = r.text
             if "illegal" in msg.lower() or "illegal" in r.text.lower():
                 params_no_tok = {k: v for k, v in params.items() if k != "token"}
-                r = self.session.get(FINMIND_API, params=params_no_tok, timeout=timeout)
+                r = self._session_get_retry(params_no_tok, timeout, _retry)
 
         if r.status_code == 402:
             raise FinMindError("FinMind quota exceeded (HTTP 402).")
@@ -96,6 +150,8 @@ class FinMindClient:
         data = payload.get("data", [])
         if not isinstance(data, list):
             raise FinMindError(f"FinMind API error: unexpected payload: {payload}")
+
+        self._ds_cache[_cache_key] = data
         return data
 
     def fetch_month_revenue(self, stock_id: str, start_date: date, end_date: date, timeout: float = 30.0) -> pd.DataFrame:

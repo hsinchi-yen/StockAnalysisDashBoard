@@ -19,6 +19,8 @@ val syncPythonSources by tasks.registering(Sync::class) {
         include("datasource_finmind.py")
         include("datasource_goodinfo.py")
         include("datasource_mops.py")
+        include("datasource_moneydj.py")
+        include("datasource_tdcc.py")
         include("series_builder.py")
     }
     into(pythonSourceDir)

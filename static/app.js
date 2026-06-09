@@ -1606,16 +1606,21 @@ function renderShareholdingSpread(data) {
     hovertemplate: `${lv.label}<br>%{x}<br>%{y:.2f}%<extra></extra>`,
   }));
 
+  const isMobile = window.innerWidth < 900;
   Plotly.newPlot(
     stackedDiv,
     traces,
     baseChartLayout("持股級距占比堆疊（逐週）", {
-      height: 320,
+      height: isMobile ? 280 : 320,
       hovermode: "closest",
       xaxis: { type: "date", tickformat: "%Y/%m", rangeslider: { visible: true, thickness: 0.07 } },
       yaxis: { title: "占比 (%)", rangemode: "tozero", ticksuffix: "%" },
-      legend: { orientation: "v", x: 1.02, y: 0.5, font: { size: 10 } },
-      margin: { l: 52, r: 160, t: 50, b: 36 },
+      legend: isMobile
+        ? { orientation: "h", x: 0, y: -0.22, font: { size: 9 } }
+        : { orientation: "v", x: 1.02, y: 0.5, font: { size: 10 } },
+      margin: isMobile
+        ? { l: 46, r: 10, t: 40, b: 80 }
+        : { l: 52, r: 160, t: 50, b: 36 },
     }),
     { ...PLOTLY_CONFIG, responsive: true }
   );

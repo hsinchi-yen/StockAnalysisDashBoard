@@ -58,33 +58,32 @@ scp @sshOpts stock-dashboard-arm64.tar embedded_deployment\run_docker_service.sh
 
 ## Step 4 — Deploy on remote
 
+> **Note:** `run_docker_service.sh start` always rebuilds the image from local files.
+> To deploy the **pre-built arm64 image** from the tar, use `docker run` directly instead.
+
 ```bash
 ssh root@10.1.1.230
 cd /root/STOCKANALYSISDASHBOARD
 
-# Load image
+# Load pre-built image
 docker load -i stock-dashboard-arm64.tar
 
 # Stop & remove old container
 docker stop stock-dashboard 2>/dev/null || true
 docker rm   stock-dashboard 2>/dev/null || true
 
-# Start with host networking on port 8502
-chmod +x run_docker_service.sh
-HOST_PORT=8502 ./run_docker_service.sh start
+# Run container from the loaded arm64 image (no local rebuild)
+docker run -d \
+  --name stock-dashboard \
+  --restart unless-stopped \
+  --network host \
+  stock-dashboard:arm64 \
+  python -m uvicorn api:app --host 0.0.0.0 --port 8502
 
-# Prune the dangling image from the previous deploy
+# Prune dangling images from the previous deploy
 docker image prune -f
 
 # Remove the tar after load
-rm -f stock-dashboard-arm64.tar
-```
-
-Or equivalently, call the script directly after loading the image:
-```bash
-docker load -i stock-dashboard-arm64.tar
-HOST_PORT=8502 ./run_docker_service.sh restart
-docker image prune -f
 rm -f stock-dashboard-arm64.tar
 ```
 

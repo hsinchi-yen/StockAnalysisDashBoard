@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Optional
@@ -11,6 +12,27 @@ import requests
 
 
 FINMIND_API = "https://api.finmindtrade.com/api/v4/data"
+
+# FinMind TaiwanStockHoldingSharesPer returns descriptive strings for HoldingSharesLevel.
+# Map them to canonical numeric codes "1"–"15" used throughout this project.
+_FINMIND_LEVEL_MAP: dict[str, str] = {
+    "1-999": "1",
+    "1,000-5,000": "2",
+    "5,001-10,000": "3",
+    "10,001-15,000": "4",
+    "15,001-20,000": "5",
+    "20,001-30,000": "6",
+    "30,001-40,000": "7",
+    "40,001-50,000": "8",
+    "50,001-100,000": "9",
+    "100,001-200,000": "10",
+    "200,001-400,000": "11",
+    "400,001-600,000": "12",
+    "600,001-800,000": "13",
+    "800,001-1,000,000": "14",
+    "more than 1,000,001": "15",
+}
+
 
 class FinMindError(RuntimeError):
     pass
@@ -24,6 +46,9 @@ class FinMindClient:
     default_timeout: float = field(
         default_factory=lambda: float(os.environ.get("MICROECO_FINMIND_TIMEOUT", "30"))
     )
+    # Per-request-session cache: deduplicates repeated fetches of the same dataset
+    # (e.g. TaiwanStockBalanceSheet is used by 5+ methods in buy_score).
+    _ds_cache: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.session is None:
@@ -37,9 +62,17 @@ class FinMindClient:
         start_date: date,
         end_date: date,
         timeout: float = 0,
+        _retry: int = 1,
     ) -> list[dict]:
         if timeout <= 0:
             timeout = self.default_timeout
+
+        # Deduplicate: same (dataset, stock, start, end) within one client instance
+        # avoids re-fetching e.g. TaiwanStockBalanceSheet 5 times in buy_score.
+        _cache_key = (dataset, stock_id, start_date.isoformat(), end_date.isoformat())
+        if _cache_key in self._ds_cache:
+            return self._ds_cache[_cache_key]
+
         params = {
             "dataset": dataset,
             "data_id": stock_id,
@@ -49,7 +82,16 @@ class FinMindClient:
         if self.api_key:
             params["token"] = self.api_key
 
-        r = self.session.get(FINMIND_API, params=params, timeout=timeout)
+        for attempt in range(1 + _retry):
+            try:
+                r = self.session.get(FINMIND_API, params=params, timeout=timeout)
+                break
+            except requests.exceptions.ReadTimeout:
+                if attempt < _retry:
+                    # Back off 3 s before the retry so FinMind rate-limit window resets.
+                    time.sleep(3.0)
+                    continue
+                raise
 
         # FinMind returns HTTP 400 {"msg":"Token is illegal."} when the token is
         # a website session JWT (no `exp`) instead of an API-login-issued JWT.
@@ -61,7 +103,15 @@ class FinMindClient:
                 msg = r.text
             if "illegal" in msg.lower() or "illegal" in r.text.lower():
                 params_no_tok = {k: v for k, v in params.items() if k != "token"}
-                r = self.session.get(FINMIND_API, params=params_no_tok, timeout=timeout)
+                for attempt in range(1 + _retry):
+                    try:
+                        r = self.session.get(FINMIND_API, params=params_no_tok, timeout=timeout)
+                        break
+                    except requests.exceptions.ReadTimeout:
+                        if attempt < _retry:
+                            time.sleep(3.0)
+                            continue
+                        raise
 
         if r.status_code == 402:
             raise FinMindError("FinMind quota exceeded (HTTP 402).")
@@ -75,6 +125,8 @@ class FinMindClient:
         data = payload.get("data", [])
         if not isinstance(data, list):
             raise FinMindError(f"FinMind API error: unexpected payload: {payload}")
+
+        self._ds_cache[_cache_key] = data
         return data
 
     def fetch_month_revenue(self, stock_id: str, start_date: date, end_date: date, timeout: float = 30.0) -> pd.DataFrame:
@@ -89,10 +141,25 @@ class FinMindClient:
         if df.empty:
             return pd.DataFrame(columns=["month", "revenue"])
 
-        # FinMind date is YYYY-MM-DD; normalize to month start
-        df["month"] = pd.to_datetime(df["date"]).dt.to_period("M").dt.to_timestamp(how="start")
+        # IMPORTANT: FinMind's `date` field for TaiwanStockMonthRevenue is the
+        # *announcement* date (≈ the 10th of the month AFTER the revenue period),
+        # not the revenue month itself. Deriving the month from `date` shifts
+        # every figure forward by one month (e.g. May revenue announced Jun 10
+        # would be mislabeled as June). The dataset carries the true period in
+        # `revenue_year` / `revenue_month`, so use those when present.
+        if "revenue_year" in df.columns and "revenue_month" in df.columns:
+            ry = pd.to_numeric(df["revenue_year"], errors="coerce")
+            rm = pd.to_numeric(df["revenue_month"], errors="coerce")
+            month = pd.to_datetime(
+                {"year": ry, "month": rm, "day": 1}, errors="coerce"
+            )
+            # Fall back to date-derived month only for rows missing the period fields.
+            fallback = pd.to_datetime(df["date"], errors="coerce").dt.to_period("M").dt.to_timestamp(how="start")
+            df["month"] = month.fillna(fallback)
+        else:
+            df["month"] = pd.to_datetime(df["date"]).dt.to_period("M").dt.to_timestamp(how="start")
         df["revenue"] = pd.to_numeric(df.get("revenue"), errors="coerce")
-        df = df[["month", "revenue"]].drop_duplicates(subset=["month"], keep="last").sort_values("month")
+        df = df[["month", "revenue"]].dropna(subset=["month"]).drop_duplicates(subset=["month"], keep="last").sort_values("month")
         return df
 
     def fetch_stock_price(self, stock_id: str, start_date: date, end_date: date, timeout: float = 30.0) -> pd.DataFrame:
@@ -218,6 +285,35 @@ class FinMindClient:
             return None
         return str(name).strip() or None
 
+    def fetch_stock_industry(self, stock_id: str, timeout: float = 20.0) -> Optional[str]:
+        """Fetch a stock's industry category from FinMind TaiwanStockInfo.
+
+        Returns the industry_category string (e.g. '半導體業', '金融保險業') or None.
+        """
+        params = {"dataset": "TaiwanStockInfo", "data_id": stock_id}
+        if self.api_key:
+            params["token"] = self.api_key
+        try:
+            r = self.session.get(FINMIND_API, params=params, timeout=timeout)
+        except Exception:
+            return None
+        if r.status_code >= 400:
+            return None
+        try:
+            payload = r.json()
+        except Exception:
+            return None
+        if payload.get("status") != 200:
+            return None
+        data = payload.get("data") or []
+        if not data:
+            return None
+        first = data[0]
+        industry = first.get("industry_category") or first.get("industry")
+        if not industry:
+            return None
+        return str(industry).strip() or None
+
     def fetch_stock_per(self, stock_id: str, start_date: date, end_date: date, timeout: float = 30.0) -> pd.DataFrame:
         """Fetch daily PER/PBR/dividend_yield (FinMind dataset: TaiwanStockPER)."""
 
@@ -325,11 +421,10 @@ class FinMindClient:
 
 
     def fetch_shareholding_spread(self, stock_id: str, start_date: date, end_date: date, timeout: float = 30.0) -> pd.DataFrame:
-        """
-        Fetch TaiwanStockHoldingSharesPer (股權分散表)
-        1~15 represent different HoldingSharesLevels.
-        Level 15: > 1,000,000 shares (大戶)
-        Level 1~9: < 50,000 shares (散戶, generally 1-9 covers <50k or <100k depending on bracket)
+        """Fetch TaiwanStockHoldingSharesPer (集保股權分散表).
+
+        Returns DataFrame with columns: date, HoldingSharesLevel (str "1"–"15"), percent (float).
+        Rows for 'total' and 'difference' are dropped; only the 15 lot brackets are kept.
         """
         try:
             data = self._get_dataset(
@@ -340,8 +435,6 @@ class FinMindClient:
                 timeout=timeout,
             )
         except FinMindError as exc:
-            # This dataset is gated by sponsor level on some FinMind plans.
-            # Treat as unavailable data instead of hard-failing buy score flow.
             msg = str(exc).lower()
             if "level is register" in msg or "sponsor" in msg:
                 return pd.DataFrame(columns=["date", "HoldingSharesLevel", "percent"])
@@ -350,11 +443,14 @@ class FinMindClient:
         df = pd.DataFrame(data)
         if df.empty:
             return pd.DataFrame(columns=["date", "HoldingSharesLevel", "percent"])
-            
+
         df["date"] = pd.to_datetime(df["date"])
         df["percent"] = pd.to_numeric(df["percent"], errors="coerce")
-        df["HoldingSharesLevel"] = df["HoldingSharesLevel"].astype(str)
-        return df
+        # Normalize FinMind's descriptive level strings → canonical "1"–"15".
+        # Rows that don't map (total / difference) are dropped via dropna.
+        df["HoldingSharesLevel"] = df["HoldingSharesLevel"].astype(str).map(_FINMIND_LEVEL_MAP)
+        df = df.dropna(subset=["HoldingSharesLevel"])
+        return df[["date", "HoldingSharesLevel", "percent"]].copy()
 
     def fetch_balance_sheet(self, stock_id: str, start_date: date, end_date: date, timeout: float = 30.0) -> pd.DataFrame:
         """Fetch quarterly balance sheet (FinMind dataset: TaiwanStockBalanceSheet).
@@ -654,78 +750,51 @@ class FinMindClient:
     ) -> tuple[pd.DataFrame, Optional[float]]:
         """Annual Free Cash Flow = Operating CF - |CapEx|.
 
-        Taiwan cash flow statements report cumulative YTD. We use the Q4 (December)
-        entry for each year as the annual total.
+        Taiwan cash-flow statements are cumulative YTD. For each year we pick the
+        *latest available* quarter-end so the in-progress current year stays
+        visible (marked is_full_year=False); fully reported years use Q4.
 
         Returns:
             (df, share_capital)
-            df: DataFrame with columns [year, operating_cf, capex, fcf]
-                - capex is the absolute value of capital expenditures
-                - fcf = operating_cf - capex
+            df columns: [year, operating_cf, capex, fcf, quarter_label, is_full_year]
             share_capital: IssuedCapital from balance sheet (NT$千) or None
         """
         cf = self.fetch_cash_flows_statement(stock_id, start_date, end_date, timeout)
         bs = self.fetch_balance_sheet(stock_id, start_date, end_date, timeout)
 
-        empty_df = pd.DataFrame(columns=["year", "operating_cf", "capex", "fcf"])
+        empty_df = pd.DataFrame(columns=["year", "operating_cf", "capex", "fcf", "quarter_label", "is_full_year"])
 
         if cf.empty:
             return empty_df, None
 
-        # ── Extract operating CF ────────────────────────────────────────
-        opcf_types = [
-            "NetCashInflowFromOperatingActivities",
-            "CashFlowsFromOperatingActivities",
-            "NetCashProvidedByUsedInOperatingActivities",
-            "OperatingActivities",
-        ]
-        opcf_series: pd.Series | None = None
-        for t in opcf_types:
-            sub = cf[cf["type"] == t].drop_duplicates(subset=["date"], keep="last")
-            if not sub.empty:
-                opcf_series = pd.Series(
-                    sub["value"].values, index=pd.to_datetime(sub["date"]), dtype=float
-                ).sort_index()
-                break
-
-        # ── Extract CapEx ───────────────────────────────────────────────
-        capex_types = [
-            "AcquisitionOfPropertyPlantAndEquipment",
-            "CashOutflowForAcquisitionOfPropertyPlantAndEquipment",
-            "PaymentsForAcquisitionOfPropertyPlantAndEquipment",
-            "PropertyAndPlantAndEquipment",
-            "PurchaseOfPropertyPlantAndEquipmentIntangibleAssetsAndOtherLongTermAssets",
-        ]
-        capex_series: pd.Series | None = None
-        for t in capex_types:
-            sub = cf[cf["type"] == t].drop_duplicates(subset=["date"], keep="last")
-            if not sub.empty:
-                capex_series = pd.Series(
-                    sub["value"].values, index=pd.to_datetime(sub["date"]), dtype=float
-                ).sort_index()
-                break
-
+        opcf_series, capex_series = self._extract_cf_series(cf)
         if opcf_series is None:
             return empty_df, None
 
-        # Use Q4 (December) entries for annual values
-        opcf_annual = opcf_series[opcf_series.index.month == 12]
-        capex_annual = (
-            capex_series[capex_series.index.month == 12] if capex_series is not None else pd.Series(dtype=float)
-        )
-
         rows = []
-        for dt, opcf_val in opcf_annual.items():
-            year = dt.year
-            capex_val = capex_annual.get(dt) if dt in capex_annual.index else None
+        years_seen = sorted({int(dt.year) for dt in opcf_series.index})
+        for year in years_seen:
+            year_opcf = opcf_series[opcf_series.index.year == year]
+            if year_opcf.empty:
+                continue
+            dt = max(year_opcf.index)  # latest available quarter-end in this year
+            opcf_val = year_opcf[dt]
+            if pd.isna(opcf_val):
+                continue
+
+            capex_val = capex_series.get(dt) if capex_series is not None and dt in capex_series.index else None
             capex_abs = abs(float(capex_val)) if capex_val is not None and not pd.isna(capex_val) else 0.0
-            fcf = float(opcf_val) - capex_abs if not pd.isna(opcf_val) else None
+            fcf = float(opcf_val) - capex_abs
+
+            q_num = (dt.month - 1) // 3 + 1
             rows.append(
                 {
                     "year": year,
-                    "operating_cf": None if pd.isna(opcf_val) else float(opcf_val),
+                    "operating_cf": float(opcf_val),
                     "capex": capex_abs if capex_val is not None else None,
                     "fcf": fcf,
+                    "quarter_label": f"{year} Q{q_num}",
+                    "is_full_year": dt.month == 12,
                 }
             )
 
@@ -741,6 +810,87 @@ class FinMindClient:
                     break
 
         return result_df, share_capital
+
+    @staticmethod
+    def _extract_cf_series(cf: pd.DataFrame) -> tuple["pd.Series | None", "pd.Series | None"]:
+        """Pull operating-CF and CapEx series (NT$元, cumulative YTD) from a cash-flow DataFrame.
+
+        FinMind relabels the same line item across years (e.g. operating CF is
+        ``CashFlowsFromOperatingActivities`` pre-2022 and
+        ``NetCashInflowFromOperatingActivities`` from 2022 on). Picking only the first
+        non-empty label silently caps history at whichever label is most recent — so
+        we merge all candidate labels into one continuous series.
+        """
+        opcf_types = [
+            "NetCashInflowFromOperatingActivities",
+            "CashFlowsFromOperatingActivities",
+            "NetCashProvidedByUsedInOperatingActivities",
+            "OperatingActivities",
+        ]
+        capex_types = [
+            "AcquisitionOfPropertyPlantAndEquipment",
+            "CashOutflowForAcquisitionOfPropertyPlantAndEquipment",
+            "PaymentsForAcquisitionOfPropertyPlantAndEquipment",
+            "PropertyAndPlantAndEquipment",
+            "PurchaseOfPropertyPlantAndEquipmentIntangibleAssetsAndOtherLongTermAssets",
+        ]
+
+        def _merge(types: list[str]) -> "pd.Series | None":
+            merged: pd.Series | None = None
+            for t in types:
+                sub = cf[cf["type"] == t].drop_duplicates(subset=["date"], keep="last")
+                if sub.empty:
+                    continue
+                s = pd.Series(sub["value"].values, index=pd.to_datetime(sub["date"]), dtype=float).sort_index()
+                merged = s if merged is None else merged.combine_first(s)
+            return merged.sort_index() if merged is not None else None
+
+        return _merge(opcf_types), _merge(capex_types)
+
+    def fetch_quarterly_fcf_data(
+        self, stock_id: str, start_date: date, end_date: date, timeout: float = 30.0
+    ) -> pd.DataFrame:
+        """Quarterly **cumulative (YTD)** Free Cash Flow = Operating CF − |CapEx|.
+
+        Taiwan cash-flow statements are reported cumulatively within each fiscal
+        year (Q1, H1, 9M, FY); each quarter's value is the year-to-date running
+        total. Surfaces every filed quarter — many more data points than the
+        annual (Q4-only) view.
+
+        Returns DataFrame with columns:
+          quarter (str date), quarter_label (e.g. '2025 Q3'),
+          operating_cf, capex, fcf  (all NT$元, cumulative within the fiscal year)
+        """
+        cols = ["quarter", "quarter_label", "operating_cf", "capex", "fcf"]
+        cf = self.fetch_cash_flows_statement(stock_id, start_date, end_date, timeout)
+        if cf.empty:
+            return pd.DataFrame(columns=cols)
+
+        opcf_series, capex_series = self._extract_cf_series(cf)
+        if opcf_series is None:
+            return pd.DataFrame(columns=cols)
+
+        quarter_dates = sorted(
+            dt for dt in opcf_series.index if not pd.isna(dt) and dt.month in {3, 6, 9, 12}
+        )
+
+        rows = []
+        for dt in quarter_dates:
+            opcf_val = opcf_series.get(dt)
+            if opcf_val is None or pd.isna(opcf_val):
+                continue
+            capex_val = capex_series.get(dt) if capex_series is not None and dt in capex_series.index else None
+            capex_abs = abs(float(capex_val)) if capex_val is not None and not pd.isna(capex_val) else 0.0
+            q_num = (dt.month - 1) // 3 + 1
+            rows.append({
+                "quarter": str(dt.date()),
+                "quarter_label": f"{dt.year} Q{q_num}",
+                "operating_cf": float(opcf_val),
+                "capex": capex_abs if capex_val is not None else None,
+                "fcf": float(opcf_val) - capex_abs,
+            })
+
+        return pd.DataFrame(rows) if rows else pd.DataFrame(columns=cols)
 
     def fetch_director_shareholding_latest(
         self, stock_id: str, timeout: float = 30.0
