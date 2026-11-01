@@ -69,7 +69,7 @@
 
 ### ✅ Checkpoint D (Final)
 - [x] `pytest -q` 全通過
-- [ ] 2330 全流程：快速分析頁 → TWSE 來源 → 無誤報雷 → 隔日 buy_score 命中快取
+- [x] 2330 全流程：快速分析頁 → TWSE 來源 → 無誤報雷 → 隔日 buy_score 命中快取
 - [x] `android_sync.cmd` 清單含三個新資料源模組；三份複本 `diff` 一致
 - [ ] **最終人工驗收**
 
