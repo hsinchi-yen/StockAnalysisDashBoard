@@ -697,11 +697,12 @@ class FinMindClient:
                     return ts
             return pd.Series(dtype=float)
 
-        def _yoy(ts):
-            # tail(5) spans four quarters, so its first value is the year-ago quarter.
-            if len(ts) < 5 or ts.tail(5).iloc[0] <= 0:
+        def _yoy(ts, quarters_back=0):
+            # Four positions back is the year-ago quarter.
+            current = len(ts) - 1 - quarters_back
+            if current < 4 or ts.iloc[current - 4] <= 0:
                 return None
-            return ((ts.iloc[-1] / ts.tail(5).iloc[0]) - 1) * 100
+            return ((ts.iloc[current] / ts.iloc[current - 4]) - 1) * 100
 
         inv_ts = _get_last_quarter_val(bs, ["Inventories", "Inventory", "InventoriesNet"])
         ar_ts = _get_last_quarter_val(bs, ["AccountsReceivableNet", "AccountsReceivable", "NotesAndAccountsReceivableNet"])
@@ -712,7 +713,13 @@ class FinMindClient:
         ar_yoy = _yoy(ar_ts)
         if rev_yoy is None or (inv_yoy is None and ar_yoy is None):
             return None
-        return {"inv_yoy": inv_yoy, "ar_yoy": ar_yoy, "rev_yoy": rev_yoy}
+        return {
+            "inv_yoy": inv_yoy,
+            "ar_yoy": ar_yoy,
+            "rev_yoy": rev_yoy,
+            "ar_yoy_prev": _yoy(ar_ts, 1),
+            "rev_yoy_prev": _yoy(rev_ts, 1),
+        }
 
     def fetch_cash_flows_statement(self, stock_id: str, start_date: date, end_date: date, timeout: float = 30.0) -> pd.DataFrame:
         """Fetch quarterly cash flow statement (FinMind dataset: TaiwanStockCashFlowsStatement).

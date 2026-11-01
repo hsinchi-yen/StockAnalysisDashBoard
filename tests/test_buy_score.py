@@ -459,16 +459,30 @@ class TestReceivablesRisk:
         _patch_all_finmind(monkeypatch)
         monkeypatch.setattr(FinMindClient, "fetch_inventory_and_revenue_growth", lambda self, *a, **kw: yoy)
 
-    def test_receivable_growth_far_above_revenue_triggers(self, test_client, monkeypatch) -> None:
-        self._with_yoy(monkeypatch, inv_yoy=5.0, ar_yoy=60.0, rev_yoy=10.0)
+    def test_two_quarters_far_above_revenue_trigger(self, test_client, monkeypatch) -> None:
+        """2409's real figures: receivables outran revenue in both quarters."""
+        self._with_yoy(monkeypatch, inv_yoy=5.0, ar_yoy=33.4, rev_yoy=2.4, ar_yoy_prev=32.3, rev_yoy_prev=-4.3)
         assert "應收帳款異常膨脹" in _risk_names(test_client)
 
+    def test_one_quarter_alone_does_not_trigger(self, test_client, monkeypatch) -> None:
+        """2330's real figures: +86.7% this quarter, but only 12.9 points ahead the one before."""
+        self._with_yoy(monkeypatch, inv_yoy=5.0, ar_yoy=86.7, rev_yoy=36.0, ar_yoy_prev=48.0, rev_yoy_prev=35.1)
+        assert "應收帳款異常膨脹" not in _risk_names(test_client)
+
+    def test_earlier_quarter_alone_does_not_trigger(self, test_client, monkeypatch) -> None:
+        self._with_yoy(monkeypatch, inv_yoy=5.0, ar_yoy=10.0, rev_yoy=10.0, ar_yoy_prev=60.0, rev_yoy_prev=10.0)
+        assert "應收帳款異常膨脹" not in _risk_names(test_client)
+
+    def test_missing_previous_quarter_does_not_trigger(self, test_client, monkeypatch) -> None:
+        self._with_yoy(monkeypatch, inv_yoy=5.0, ar_yoy=60.0, rev_yoy=10.0, ar_yoy_prev=None, rev_yoy_prev=None)
+        assert "應收帳款異常膨脹" not in _risk_names(test_client)
+
     def test_receivable_growth_in_line_with_revenue_does_not_trigger(self, test_client, monkeypatch) -> None:
-        self._with_yoy(monkeypatch, inv_yoy=5.0, ar_yoy=10.0, rev_yoy=10.0)
+        self._with_yoy(monkeypatch, inv_yoy=5.0, ar_yoy=10.0, rev_yoy=10.0, ar_yoy_prev=10.0, rev_yoy_prev=10.0)
         assert "應收帳款異常膨脹" not in _risk_names(test_client)
 
     def test_fast_receivables_matching_fast_revenue_does_not_trigger(self, test_client, monkeypatch) -> None:
-        self._with_yoy(monkeypatch, inv_yoy=5.0, ar_yoy=60.0, rev_yoy=50.0)
+        self._with_yoy(monkeypatch, inv_yoy=5.0, ar_yoy=60.0, rev_yoy=50.0, ar_yoy_prev=60.0, rev_yoy_prev=50.0)
         assert "應收帳款異常膨脹" not in _risk_names(test_client)
 
     def test_missing_receivables_neither_triggers_nor_errors(self, test_client, monkeypatch) -> None:
@@ -476,13 +490,40 @@ class TestReceivablesRisk:
         assert "應收帳款異常膨脹" not in _risk_names(test_client)
 
     def test_missing_inventory_still_checks_receivables(self, test_client, monkeypatch) -> None:
-        self._with_yoy(monkeypatch, inv_yoy=None, ar_yoy=60.0, rev_yoy=10.0)
+        self._with_yoy(monkeypatch, inv_yoy=None, ar_yoy=60.0, rev_yoy=10.0, ar_yoy_prev=60.0, rev_yoy_prev=10.0)
         assert _risk_names(test_client) == ["應收帳款異常膨脹"]
 
     def test_banks_are_exempt(self, test_client, monkeypatch) -> None:
-        self._with_yoy(monkeypatch, inv_yoy=5.0, ar_yoy=60.0, rev_yoy=10.0)
+        self._with_yoy(monkeypatch, inv_yoy=5.0, ar_yoy=60.0, rev_yoy=10.0, ar_yoy_prev=60.0, rev_yoy_prev=10.0)
         _set_industry(monkeypatch, "金融保險業")
         assert "應收帳款異常膨脹" not in _risk_names(test_client, "2891")
+
+
+class TestReceivablesYoy:
+
+    def _growth(self, monkeypatch, receivables: list[float], revenue: list[float]) -> dict:
+        quarters = pd.date_range("2025-03-31", periods=len(receivables), freq="QE")
+
+        def frame(kind: str, values: list[float]) -> pd.DataFrame:
+            return pd.DataFrame({"date": quarters, "type": kind, "value": values})
+
+        monkeypatch.setattr(FinMindClient, "fetch_balance_sheet",
+                            lambda self, *a, **kw: frame("AccountsReceivableNet", receivables))
+        monkeypatch.setattr(FinMindClient, "fetch_financial_statements",
+                            lambda self, *a, **kw: frame("Revenue", revenue))
+        return FinMindClient(api_key="t").fetch_inventory_and_revenue_growth("2330", date(2024, 1, 1), date(2026, 11, 1))
+
+    def test_reports_both_of_the_last_two_quarters(self, monkeypatch) -> None:
+        result = self._growth(monkeypatch, [100, 100, 100, 100, 200, 150], [100, 100, 100, 100, 110, 120])
+        assert result["ar_yoy"] == pytest.approx(50.0)
+        assert result["ar_yoy_prev"] == pytest.approx(100.0)
+        assert result["rev_yoy"] == pytest.approx(20.0)
+        assert result["rev_yoy_prev"] == pytest.approx(10.0)
+
+    def test_five_quarters_only_cover_the_latest(self, monkeypatch) -> None:
+        result = self._growth(monkeypatch, [100, 100, 100, 100, 200], [100, 100, 100, 100, 110])
+        assert result["ar_yoy"] == pytest.approx(100.0)
+        assert result["ar_yoy_prev"] is None
 
 
 class TestOcfDivergenceRisk:

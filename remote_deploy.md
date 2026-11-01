@@ -38,18 +38,34 @@ ssh root@10.1.1.230 'docker tag stock-dashboard:arm64 stock-dashboard:prev \
     && docker build --network host -f Dockerfile.update -t stock-dashboard:new .'
 
 # 3. Swap the container (about 10 seconds of downtime)
-ssh root@10.1.1.230 'docker tag stock-dashboard:new stock-dashboard:arm64 \
+ssh root@10.1.1.230 'cp /root/STOCKANALYSISDASHBOARD/update/run_docker_service.sh /root/STOCKANALYSISDASHBOARD/ \
+    && docker tag stock-dashboard:new stock-dashboard:arm64 \
     && docker stop stock-dashboard && docker rm stock-dashboard && \
     docker run -d --name stock-dashboard --restart unless-stopped --network host \
+    --env-file /root/STOCKANALYSISDASHBOARD/stock-dashboard.env \
     stock-dashboard:arm64 python -m uvicorn api:app --host 0.0.0.0 --port 8502'
 
 # 4. After verifying, remove the build leftovers
 ssh root@10.1.1.230 'rm -rf /root/STOCKANALYSISDASHBOARD/update; docker rmi stock-dashboard:new'
 ```
 
-Add `-e FINMIND_API_KEY=...` to `docker run` to enable the 02:00 precompute. Without it
-the nightly job only cleans the cache. The cache lives in the container, so a deploy
-starts it cold.
+The cache and the query history live in the container, so a deploy starts them empty:
+the nightly precompute has nothing to do until stocks are queried again.
+
+### Secrets
+
+`/root/STOCKANALYSISDASHBOARD/stock-dashboard.env` (mode 600, on the host only) holds `FINMIND_API_KEY=...`, which enables the
+02:00 precompute. Without the file `docker run` fails, so create it first or drop
+`--env-file`; `run_docker_service.sh` picks it up when present. Write it through stdin
+so the token stays out of process listings and shell history:
+
+```bash
+printf 'FINMIND_API_KEY=%s\n' "$TOKEN" | ssh root@10.1.1.230 \
+    'umask 077; cat > /root/STOCKANALYSISDASHBOARD/stock-dashboard.env'
+```
+
+With this key set, API requests without their own token fall back to it, so anyone who
+can reach port 8502 can spend its quota. The page itself still asks for a token.
 
 Then verify (Step 5). If it fails, use [Rollback](#rollback). The `:prev` tag already
 exists, so skip the tagging step there. After a later successful deploy, the previous
@@ -177,7 +193,7 @@ ssh root@10.1.1.230 "docker tag stock-dashboard:arm64 stock-dashboard:prev"
 # if rollback needed:
 ssh root@10.1.1.230 "docker stop stock-dashboard && docker rm stock-dashboard && \
     HOST_PORT=8502 docker run -d --name stock-dashboard --restart unless-stopped \
-    --network host stock-dashboard:prev \
+    --network host --env-file /root/STOCKANALYSISDASHBOARD/stock-dashboard.env stock-dashboard:prev \
     python -m uvicorn api:app --host 0.0.0.0 --port 8502"
 ```
 

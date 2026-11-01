@@ -11,6 +11,8 @@ HOST_PORT="${HOST_PORT:-8502}"
 CONTAINER_PORT="8000"
 ETH_IFACE="${ETH_IFACE:-eth0}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Optional host-side secrets such as FINMIND_API_KEY. Never baked into the image.
+ENV_FILE="${SCRIPT_DIR}/stock-dashboard.env"
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -69,10 +71,15 @@ cmd_start() {
     # --network host: container shares the host network stack directly.
     # This avoids iptables/NAT (not available on all Yocto kernels).
     # We override the CMD port so HOST_PORT is honoured without port mapping.
+    local env_args=()
+    if [ -f "${ENV_FILE}" ]; then
+        env_args=(--env-file "${ENV_FILE}")
+    fi
     docker run -d \
         --name "${CONTAINER_NAME}" \
         --restart unless-stopped \
         --network host \
+        "${env_args[@]}" \
         "${IMAGE_NAME}" \
         python -m uvicorn api:app --host 0.0.0.0 --port "${HOST_PORT}"
 

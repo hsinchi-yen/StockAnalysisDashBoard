@@ -2463,6 +2463,10 @@ INDUSTRY_EXCLUSIONS: dict[str, list[str]] = {
 _NON_CASH_QUALITY_INDUSTRIES = ("金融", "銀行", "保險", "證券")
 
 
+def _receivables_outpace_revenue(ar_yoy: float | None, rev_yoy: float | None) -> bool:
+    return ar_yoy is not None and rev_yoy is not None and ar_yoy > 20 and ar_yoy - rev_yoy > 20
+
+
 def _get_industry_exclusions(industry: str | None) -> set[str]:
     if not industry:
         return set()
@@ -2533,7 +2537,7 @@ def buy_score(
     token_resolved = _require_token(token, x_finmind_token)
     today = date.today()
 
-    cache_key = build_cache_key("api_buy_score_v7", stock_id=sid, asof=today.isoformat())
+    cache_key = build_cache_key("api_buy_score_v8", stock_id=sid, asof=today.isoformat())
     cached = cache.get(cache_key)
     if cached and isinstance(cached.get("criteria"), list):
         _mark_cache_hit()
@@ -3141,18 +3145,22 @@ def buy_score(
 
     cash_quality_applies = not any(kw in (industry or "") for kw in _NON_CASH_QUALITY_INDUSTRIES)
 
-    # R1: 應收帳款異常膨脹 — 應收成長率大於營收成長率 20% 以上
+    # R1: 應收帳款異常膨脹 — 連續 2 季應收成長率大於營收成長率 20% 以上。
+    # One quarter alone is usually billing timing or a low base.
     if inv_data is not None and cash_quality_applies:
         try:
             ar_y = inv_data.get("ar_yoy")
-            rev_y = inv_data.get("rev_yoy", 0)
-            if ar_y is not None and ar_y > 20 and (ar_y - rev_y > 20):
+            rev_y = inv_data.get("rev_yoy")
+            if (
+                _receivables_outpace_revenue(ar_y, rev_y)
+                and _receivables_outpace_revenue(inv_data.get("ar_yoy_prev"), inv_data.get("rev_yoy_prev"))
+            ):
                 risk_criteria.append({
                     "category": "財務造假",
                     "name": "應收帳款異常膨脹",
                     "status": "warning",
                     "value_label": f"應收 YoY {ar_y:.1f}%",
-                    "description": f"應收成長遠大於營收({rev_y:.1f}%)，留意虛增營收或收款惡化"
+                    "description": f"連續 2 季應收成長遠大於營收（本季營收 {rev_y:.1f}%），留意虛增營收或收款惡化"
                 })
         except Exception:
             pass
