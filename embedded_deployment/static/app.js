@@ -39,9 +39,7 @@ function setStatus(text) {
 }
 
 function setLoading(isLoading) {
-  $("go").disabled = isLoading;
-  $("stockId").disabled = isLoading;
-  $("years").disabled = isLoading;
+  // 查詢按鈕與代號欄保持可用：重新查詢會取消進行中的請求，不必等上一檔跑完。
   $("token").disabled = isLoading;
   if ($("tokenSave")) $("tokenSave").disabled = isLoading;
   if ($("tokenClear")) $("tokenClear").disabled = isLoading;
@@ -104,13 +102,25 @@ function renderTable(container, headers, rows) {
   container.appendChild(wrapper);
 }
 
-async function fetchJson(url, token) {
+// A superseded query never settles, so its handlers can't paint over the new one.
+const NEVER_SETTLES = new Promise(() => {});
+
+async function fetchJson(url, token, signal) {
+  try {
+    return await requestJson(url, token, signal);
+  } catch (e) {
+    if (e.name === "AbortError") return NEVER_SETTLES;
+    throw e;
+  }
+}
+
+async function requestJson(url, token, signal) {
   let finalUrl = url;
   if (token && token.trim()) {
     const sep = url.includes("?") ? "&" : "?";
     finalUrl = url + sep + "token=" + encodeURIComponent(token.trim());
   }
-  const res = await fetch(finalUrl);
+  const res = await fetch(finalUrl, signal ? { signal } : undefined);
   if (!res.ok) {
     let detail = "";
     try {
@@ -191,6 +201,9 @@ const dashboardState = {
   valuationExtraData: null,
   forwardRollingEpsData: null,
   latestSnapshot: null,
+  quickSummary: null,
+  quickRiskFailed: false,
+  marginTradingData: null,
   // === cache-restored extras ===
   cashRows: [],
   buyScoreData: null,
@@ -293,6 +306,7 @@ function restoreFromState() {
   safe("shareholding", () => { if (dashboardState.shareholdingData) renderShareholding(dashboardState.shareholdingData); });
   safe("shareholdingSpread", () => { if (dashboardState.shareholdingSpreadData) renderShareholdingSpread(dashboardState.shareholdingSpreadData); });
   safe("buyScore", () => { if (dashboardState.buyScoreData) renderBuyScore(dashboardState.buyScoreData); });
+  safe("marginTrading", () => { if (dashboardState.marginTradingData) renderMarginTrading(dashboardState.marginTradingData); });
   safe("signalCard", () => renderSignalCard(dashboardState));
 }
 
@@ -304,8 +318,8 @@ const oneHandState = {
 };
 
 const tabState = {
-  current: "tab-basic",
-  history: ["tab-basic"],
+  current: "tab-quick",
+  history: ["tab-quick"],
 };
 
 function updateTabBackButtonState() {
@@ -336,6 +350,7 @@ function switchTab(tabId, options = {}) {
 
   tabState.current = tabId;
   updateTabBackButtonState();
+  flushPendingRenders(tabId);
 
   if (scrollToTop) {
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -352,7 +367,7 @@ function switchTab(tabId, options = {}) {
 function switchToPreviousTab() {
   if (tabState.history.length <= 1) return;
   tabState.history.pop();
-  const prev = tabState.history[tabState.history.length - 1] || "tab-basic";
+  const prev = tabState.history[tabState.history.length - 1] || "tab-quick";
   switchTab(prev, { recordHistory: false, scrollToTop: true });
 }
 
@@ -2458,7 +2473,7 @@ function renderBuyScore(data) {
       if (!groups[cat]) groups[cat] = [];
       groups[cat].push(c);
     });
-    const catOrder = ["財務造假", "財務惡化", "籌碼治理", "籌碼排雷", "估值排雷", "品質排雷", "獲利排雷", "存貨排雷", "配息排雷", "其他"];
+    const catOrder = ["財務造假", "財務惡化", "籌碼治理", "治理", "籌碼排雷", "估值排雷", "品質排雷", "獲利排雷", "存貨排雷", "配息排雷", "其他"];
     const sortedCats = Object.keys(groups).sort((a, b) => {
       const ia = catOrder.indexOf(a), ib = catOrder.indexOf(b);
       return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
@@ -2517,6 +2532,384 @@ function initTabs() {
   });
 
   updateTabBackButtonState();
+}
+
+// ============================================================
+// === Quick Analysis (快速分析) ===
+// ============================================================
+
+// <quick-verdict>
+// Copy of quick_analysis.judge_verdict, which is the authority. buy_score arrives
+// after the valuations, so the page updates the verdict itself. Both sides are
+// checked against tests/fixtures/quick_verdict_cases.json.
+function judgeVerdict(price, floor, ceiling, position, riskLevel, riskCount) {
+  if (riskLevel === "high") return ["avoid", `偵測到 ${riskCount} 項排雷警示，先避開`];
+  if (price === null || floor === null || ceiling === null) return ["insufficient", "估值資料不足"];
+  if (floor >= ceiling) {
+    if (price < Math.min(floor, ceiling)) return ["buy", "現價低於安全邊際估值，具下檔保護"];
+    if (price > Math.max(floor, ceiling)) return ["wait", "現價高於成長估值，等待回檔"];
+    return ["hold", "估值模型分歧，現價落在兩者之間"];
+  }
+  if (price < floor) return ["buy", "現價低於安全邊際估值，具下檔保護"];
+  if (price > ceiling) return ["wait", "現價高於成長估值，等待回檔"];
+  if (position !== null && position < 0.5) {
+    if (riskLevel === "low") return ["accumulate", "現價位於區間下半，可分批佈局"];
+    if (riskLevel === "medium") return ["watch", "估值合理但有 1 項警示，列入觀察"];
+    return ["watch", "估值合理，排雷資料不足，列入觀察"];
+  }
+  return ["hold", "現價偏向成長估值，上檔有限"];
+}
+// </quick-verdict>
+
+const QUICK_VERDICT_LABELS = {
+  buy: "低於安全邊際",
+  accumulate: "可分批佈局",
+  watch: "列入觀察",
+  hold: "不追價",
+  wait: "等待回檔",
+  avoid: "先避開",
+  insufficient: "資料不足",
+};
+
+// Which card in the 估值 tab explains each valuation model.
+const QUICK_SOURCE_TARGETS = {
+  dcf: "dcfSection",
+  valuation_extra: "valuationExtraPanel",
+  forward_rolling_eps: "forwardRollingEpsPanel",
+  pe_river: "peRiverChart",
+};
+
+// The floor→ceiling band occupies this slice of the track, leaving room on both
+// ends so a price outside the range still shows which way it fell out.
+const LADDER_BAND_START = 12;
+const LADDER_BAND_END = 88;
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (ch) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]
+  ));
+}
+
+function formatQuickPrice(value) {
+  return value === null || value === undefined
+    ? "—"
+    : Number(value).toLocaleString("zh-TW", { maximumFractionDigits: 2 });
+}
+
+function formatQuickPct(value) {
+  if (value === null || value === undefined) return "—";
+  return `${value > 0 ? "+" : ""}${Number(value).toFixed(1)}%`;
+}
+
+function quickQueryUrl(stockId, years) {
+  const { g, r, mos } = dcfState;
+  return `/api/stocks/${encodeURIComponent(stockId)}/quick_summary`
+    + `?years=${encodeURIComponent(years)}&growth_rate=${g}&discount_rate=${r}&margin_of_safety=${mos}`;
+}
+
+// null while buy_score is pending or failed; the caller tells those apart.
+function quickRisk(buyScore) {
+  if (!buyScore || !Array.isArray(buyScore.risk_criteria)) return null;
+  const count = Number(buyScore.risk_score) || buyScore.risk_criteria.length;
+  return {
+    level: count >= 2 ? "high" : count === 1 ? "medium" : "low",
+    count,
+    names: buyScore.risk_criteria.map((item) => item.name).filter(Boolean),
+  };
+}
+
+function renderQuickVerdict(summary, risk) {
+  const el = $("quickVerdict");
+  if (!el) return;
+  clearSkeleton("quickVerdict");
+
+  const pending = !risk && !dashboardState.quickRiskFailed;
+  const [verdict, text] = pending
+    ? ["pending", "估值已完成，排雷檢查中…"]
+    : judgeVerdict(summary.price, summary.floor, summary.ceiling, summary.position,
+        risk ? risk.level : null, risk ? risk.count : 0);
+  const label = pending ? "排雷檢查中" : QUICK_VERDICT_LABELS[verdict];
+
+  const facts = [];
+  const score = dashboardState.buyScoreData;
+  if (risk) {
+    facts.push(risk.count ? `排雷警示 ${risk.count} 項` : "無排雷警示");
+    if (score && score.pass_rate !== null && score.pass_rate !== undefined) {
+      facts.push(`買入評分通過率 ${Number(score.pass_rate).toFixed(1)}%`);
+    }
+  } else if (dashboardState.quickRiskFailed) {
+    facts.push("排雷資料暫不可用");
+  }
+
+  const name = [summary.stock_id, summary.stock_name].filter(Boolean).join(" ");
+  el.innerHTML = `
+    <div class="quick-verdict-head">
+      <span class="quick-verdict-badge quick-verdict--${verdict}">${escapeHtml(label)}</span>
+      <strong class="quick-verdict-name">${escapeHtml(name)}</strong>
+      <span class="quick-verdict-price">現價 ${formatQuickPrice(summary.price)}</span>
+    </div>
+    <p class="quick-verdict-text">${escapeHtml(text)}</p>
+    ${facts.length ? `<p class="quick-verdict-facts">${facts.map(escapeHtml).join("｜")}</p>` : ""}
+    <p class="chart-note quick-verdict-note">依估值模型自動判定，僅供參考，不構成投資建議。</p>`;
+}
+
+function quickModelGroup(label, components) {
+  if (!components || !components.length) return "";
+  const chips = components.map((c) => {
+    const target = QUICK_SOURCE_TARGETS[c.source] || "";
+    return `<button type="button" class="ladder-model" data-target="${target}">`
+      + `${escapeHtml(c.name)} ${formatQuickPrice(c.value)}</button>`;
+  }).join("");
+  return `<div class="ladder-models-group"><span>${label}</span>${chips}</div>`;
+}
+
+function quickLadderTrack(summary) {
+  const { price, floor, ceiling } = summary;
+  const span = LADDER_BAND_END - LADDER_BAND_START;
+  const dot = Math.min(98, Math.max(2, LADDER_BAND_START + ((price - floor) / (ceiling - floor)) * span));
+  const inner = Math.min(LADDER_BAND_END, Math.max(LADDER_BAND_START, dot));
+  const state = price < floor ? "低於安全邊際" : price > ceiling ? "高於成長估值" : "現價";
+  const edge = dot < 22 ? " ladder-dot-label--start" : dot > 78 ? " ladder-dot-label--end" : "";
+  return `
+    <div class="ladder-track">
+      <div class="ladder-seg ladder-seg--down" style="left:${LADDER_BAND_START}%;width:${inner - LADDER_BAND_START}%"></div>
+      <div class="ladder-seg ladder-seg--up" style="left:${inner}%;width:${LADDER_BAND_END - inner}%"></div>
+      <div class="ladder-tick" style="left:${LADDER_BAND_START}%"></div>
+      <div class="ladder-tick" style="left:${LADDER_BAND_END}%"></div>
+      <div class="ladder-dot" style="left:${dot}%"></div>
+      <div class="ladder-dot-label${edge}" style="left:${dot}%">${state} ${formatQuickPrice(price)}</div>
+    </div>`;
+}
+
+function renderQuickLadder(summary, risk) {
+  const el = $("quickLadder");
+  if (!el) return;
+  clearSkeleton("quickLadder");
+
+  const { price, floor, ceiling, downside_pct: down, upside_pct: up } = summary;
+  const complete = price !== null && floor !== null && ceiling !== null;
+  const ordered = complete && floor < ceiling;
+
+  let track = `<div class="ladder-track ladder-track--empty"></div>`;
+  let notice = "";
+  if (ordered) {
+    track = quickLadderTrack(summary);
+  } else if (complete) {
+    notice = `<p class="ladder-notice">模型分歧：安全邊際估值高於成長期估值，請對照下方各模型的數值自行判讀。</p>`;
+  } else {
+    notice = `<p class="ladder-notice">估值資料不足，無法計算下檔與上檔。</p>`;
+  }
+
+  const stats = [];
+  if (down !== null && up !== null) {
+    stats.push(`<div class="ladder-stat"><span>回落到安全邊際</span><strong class="ladder-stat--down">${formatQuickPct(down)}</strong></div>`);
+    stats.push(`<div class="ladder-stat"><span>上漲到成長估值</span><strong class="ladder-stat--up">${formatQuickPct(up)}</strong></div>`);
+    if (down < 0 && up > 0) {
+      stats.push(`<div class="ladder-stat"><span>潛在獲利 ÷ 風險</span><strong>${(up / -down).toFixed(1)} 倍</strong></div>`);
+    }
+  }
+
+  const riskChips = risk && risk.names.length
+    ? `<div class="ladder-risks">${risk.names.map((n) => `<span class="ladder-risk">${escapeHtml(n)}</span>`).join("")}</div>`
+    : "";
+
+  el.innerHTML = `
+    <div class="ladder ladder--risk-${risk ? risk.level : "pending"}">
+      <div class="ladder-ends">
+        <div><span>安全邊際估值</span><strong>${formatQuickPrice(floor)}</strong></div>
+        <div class="ladder-ends-right"><span>成長期估值</span><strong>${formatQuickPrice(ceiling)}</strong></div>
+      </div>
+      ${track}
+      ${notice}
+      ${stats.length ? `<div class="ladder-stats">${stats.join("")}</div>` : ""}
+      ${riskChips}
+      <div class="ladder-models">
+        ${quickModelGroup("安全邊際", summary.floor_components)}
+        ${quickModelGroup("成長期", summary.ceiling_components)}
+      </div>
+    </div>`;
+}
+
+function showQuickQuadrantNotice(el, message) {
+  clearSkeleton("quickQuadrant");
+  el.classList.add("quick-quadrant--notice");
+  el.textContent = message;
+}
+
+function renderQuickQuadrant(summary, buyScore) {
+  const el = $("quickQuadrant");
+  if (!el) return;
+  if (!buyScore) {
+    if (dashboardState.quickRiskFailed) showQuickQuadrantNotice(el, "排雷資料暫不可用，無法定位象限");
+    return;
+  }
+  if (summary.upside_pct === null || summary.upside_pct === undefined) {
+    showQuickQuadrantNotice(el, "估值資料不足，無法定位象限");
+    return;
+  }
+  clearSkeleton("quickQuadrant");
+  el.classList.remove("quick-quadrant--notice");
+
+  const riskCount = Number(buyScore.risk_score) || 0;
+  const failed = (buyScore.criteria || []).filter((c) => c.pass === false);
+  const x = Math.min(10, riskCount * 2 + failed.length / 4);
+  const y = summary.upside_pct;
+  const yMax = Math.max(60, y + 15);
+  const yMin = Math.min(-30, y - 15);
+
+  const quadrant = (x0, x1, y0, y1, color) => ({
+    type: "rect", layer: "below", line: { width: 0 }, fillcolor: color, x0, x1, y0, y1,
+  });
+  const label = (lx, ly, text) => ({
+    x: lx, y: ly, text, showarrow: false, font: { size: 13 }, opacity: 0.75,
+  });
+  const riskNames = (buyScore.risk_criteria || []).map((r) => r.name);
+  const hover = [
+    `風險分數 ${x.toFixed(1)}｜上檔 ${formatQuickPct(y)}`,
+    riskNames.length ? `排雷：${riskNames.join("、")}` : "無排雷警示",
+    failed.length ? `未通過：${failed.slice(0, 6).map((c) => c.label).join("、")}${failed.length > 6 ? " …" : ""}` : "",
+  ].filter(Boolean).join("<br>");
+
+  const trace = {
+    x: [x], y: [y], type: "scatter", mode: "markers",
+    marker: { size: 18, color: "#3b82f6", line: { width: 2, color: "#ffffff" } },
+    text: [hover], hovertemplate: "%{text}<extra></extra>",
+  };
+  const layout = baseChartLayout("", {
+    showlegend: false,
+    hovermode: "closest",
+    margin: { l: 56, r: 16, t: 16, b: 48 },
+    xaxis: { title: { text: "風險分數" }, range: [0, 10], fixedrange: true, zeroline: false },
+    yaxis: { title: { text: "上檔空間" }, range: [yMin, yMax], fixedrange: true, ticksuffix: "%", zeroline: false },
+    shapes: [
+      quadrant(0, 3, 0, yMax, "rgba(16,185,129,0.14)"),
+      quadrant(3, 10, 0, yMax, "rgba(245,158,11,0.14)"),
+      quadrant(0, 3, yMin, 0, "rgba(100,116,139,0.14)"),
+      quadrant(3, 10, yMin, 0, "rgba(239,68,68,0.14)"),
+      { type: "line", x0: 3, x1: 3, y0: yMin, y1: yMax, line: { dash: "dash", width: 1, color: "#94a3b8" } },
+      { type: "line", x0: 0, x1: 10, y0: 0, y1: 0, line: { dash: "dash", width: 1, color: "#94a3b8" } },
+    ],
+    annotations: [
+      label(1.5, yMax * 0.88, "值得買進"),
+      label(6.5, yMax * 0.88, "觀察"),
+      label(1.5, yMin * 0.8, "觀望"),
+      label(6.5, yMin * 0.8, "避開"),
+    ],
+  });
+  Plotly.newPlot(el, [trace], layout, PLOTLY_CONFIG);
+}
+
+function renderQuick() {
+  const summary = dashboardState.quickSummary;
+  if (!summary) return;
+  const risk = quickRisk(dashboardState.buyScoreData);
+  renderQuickVerdict(summary, risk);
+  renderQuickLadder(summary, risk);
+  renderQuickQuadrant(summary, dashboardState.buyScoreData);
+}
+
+function showQuickError(message) {
+  clearSkeleton("quickVerdict");
+  clearSkeleton("quickLadder");
+  clearSkeleton("quickQuadrant");
+  const el = $("quickVerdict");
+  if (el) el.textContent = `快速分析暫不可用：${message}`;
+}
+
+function initQuickAnalysis() {
+  const ladder = $("quickLadder");
+  if (!ladder) return;
+  ladder.addEventListener("click", (e) => {
+    const chip = e.target.closest(".ladder-model");
+    if (!chip) return;
+    switchTab("tab-valuation", { recordHistory: true });
+    const target = $(chip.dataset.target);
+    if (target) window.setTimeout(() => target.scrollIntoView({ behavior: "smooth", block: "center" }), 80);
+  });
+}
+
+function renderMarginTrading(data) {
+  clearSkeleton("marginTrading");
+  const el = $("marginTrading");
+  const note = $("marginTradingNote");
+  if (!el) return;
+  if (!data || !data.available) {
+    el.textContent = "TWSE 無此股融資券資料（上櫃股暫不支援）";
+    if (note) note.style.display = "none";
+    return;
+  }
+  renderMetrics(el, [
+    { key: "融資餘額（張）", value: formatNumber(data.margin_balance) },
+    { key: "融券餘額（張）", value: formatNumber(data.short_balance) },
+    { key: "券資比", value: data.short_margin_ratio === null ? "-" : `${formatFloat2(data.short_margin_ratio)}%` },
+  ]);
+  if (note) {
+    note.textContent = `資料截至 ${data.date || "-"}`;
+    note.style.display = "block";
+  }
+}
+
+// ============================================================
+// === Deferred chart rendering ===
+// ============================================================
+
+// Drawing every chart on each query is the most expensive thing the page does,
+// and only one tab is visible. Charts in other tabs wait until that tab opens.
+const CHART_ELEMENTS = {
+  plotRevenue: "revenueChart",
+  plotRevenueYoY: "revenueYoyChart",
+  plotPriceVsRevenue: "priceChart",
+  plotTrendOverview: "trendOverviewChart",
+  plotVolumeTurnoverRecent: "volumeTurnoverChart",
+  plotRoeRoa: "roeRoaChart",
+  plotDebtRatio: "debtRatioChart",
+  plotFreeCashFlow: "fcfChart",
+  plotFreeCashFlowQuarterly: "fcfQuarterlyChart",
+  plotTurnoverDays: "turnoverDaysChart",
+  plotPERiver: "peRiverChart",
+  plotMargins: "marginsChart",
+  plotEpsTrend: "epsTrendChart",
+  plotLiquidity: "liquidityChart",
+  plotBvps: "bvpsChart",
+  plotForeignHolding: "foreignHoldingChart",
+  renderCapitalFormation: "capitalFormationPanel",
+  renderShareholding: "shareholdingTable",
+  renderShareholdingSpread: "shareholdingSpreadPanel",
+};
+const CHARTS_PER_FRAME = 3;
+// tabId → Map(function name → latest call), so repeat draws collapse into one.
+const pendingRenders = new Map();
+
+function scheduleRender(tabId, name, draw) {
+  if (tabState.current === tabId) {
+    draw();
+    return;
+  }
+  if (!pendingRenders.has(tabId)) pendingRenders.set(tabId, new Map());
+  pendingRenders.get(tabId).set(name, draw);
+}
+
+function flushPendingRenders(tabId) {
+  const queue = pendingRenders.get(tabId);
+  if (!queue) return;
+  pendingRenders.delete(tabId);
+  const jobs = [...queue.values()];
+  const drawBatch = () => {
+    jobs.splice(0, CHARTS_PER_FRAME).forEach((draw) => {
+      try { draw(); } catch (e) { console.error("deferred chart:", e); }
+    });
+    if (jobs.length) requestAnimationFrame(drawBatch);
+  };
+  drawBatch();
+}
+
+function deferChartsToTabs() {
+  Object.entries(CHART_ELEMENTS).forEach(([name, elementId]) => {
+    const draw = window[name];
+    const panel = $(elementId) && $(elementId).closest(".tab-panel");
+    if (typeof draw !== "function" || !panel) return;
+    window[name] = (...args) => scheduleRender(panel.id, name, () => draw(...args));
+  });
 }
 
 // ============================================================
@@ -3098,6 +3491,7 @@ function rerenderDashboard() {
   if (dashboardState.valuationExtraData) renderValuationExtra(dashboardState.valuationExtraData);
   if (dashboardState.forwardRollingEpsData) renderForwardRollingEps(dashboardState.forwardRollingEpsData);
   renderFinancialFeed();
+  renderQuick();
 }
 
 // ── DCF recalculate button ────────────────────────────────────────────────────
@@ -3142,6 +3536,9 @@ function hookDcfRecalc() {
       );
       dashboardState.dcfData = data;
       renderDcf(data);
+      // The safety-margin floor depends on the DCF parameters.
+      dashboardState.quickSummary = await fetchJson(quickQueryUrl(sid, years), token);
+      renderQuick();
     } catch (err) {
       if (container) {
         container.classList.remove("skeleton-section");
@@ -3215,6 +3612,9 @@ function renderLatestSnapshot(latest, stockId) {
 
 // ── Main query ───────────────────────────────────────────────────────────────
 
+let activeQuery = null;
+const DEEP_READ_MAX_WAIT_MS = 8000;
+
 async function runQuery() {
   const stockId = $("stockId").value.trim();
   const years = Number($("years").value);
@@ -3226,25 +3626,46 @@ async function runQuery() {
   }
   if (!token) return;
 
-  setLoading(true);
-  setStatus("查詢中...");
-  progressStart();
+  if (activeQuery) activeQuery.abort();
+  activeQuery = new AbortController();
+  const { signal } = activeQuery;
 
-  // Show skeleton loaders for slow sections
-  showSkeleton("buyScoreSkeleton");
-  showSkeleton("debtRatioChart");
-  showSkeleton("fcfChart");
-  showSkeleton("fcfQuarterlyChart");
-  showSkeleton("dcfResult");
-  showSkeleton("shareholdingTable");
-  showSkeleton("shareholdingSpreadPanel");
-  showSkeleton("turnoverDaysChart");
-  showSkeleton("peRiverChart");
-  showSkeleton("marginsChart");
-  showSkeleton("epsTrendChart");
-  showSkeleton("liquidityChart");
-  showSkeleton("bvpsChart");
-  showSkeleton("foreignHoldingChart");
+  // Re-querying the same stock keeps its result on screen until new data lands.
+  const refreshing = dashboardState.stockId === stockId;
+  const progressWord = refreshing ? "更新中" : "查詢中";
+
+  setLoading(true);
+  setStatus(`${progressWord}...`);
+  progressStart();
+  switchTab("tab-quick");
+
+  if (!refreshing) {
+    pendingRenders.clear();
+    dashboardState.stockId = stockId;
+    dashboardState.quickSummary = null;
+    dashboardState.buyScoreData = null;
+    dashboardState.quickRiskFailed = false;
+
+    // Show skeleton loaders for slow sections
+    showSkeleton("quickVerdict");
+    showSkeleton("quickLadder");
+    showSkeleton("quickQuadrant");
+    showSkeleton("buyScoreSkeleton");
+    showSkeleton("debtRatioChart");
+    showSkeleton("fcfChart");
+    showSkeleton("fcfQuarterlyChart");
+    showSkeleton("dcfResult");
+    showSkeleton("shareholdingTable");
+    showSkeleton("shareholdingSpreadPanel");
+    showSkeleton("turnoverDaysChart");
+    showSkeleton("peRiverChart");
+    showSkeleton("marginsChart");
+    showSkeleton("epsTrendChart");
+    showSkeleton("liquidityChart");
+    showSkeleton("bvpsChart");
+    showSkeleton("foreignHoldingChart");
+    showSkeleton("marginTrading");
+  }
 
   updateTokenUsage(token);
 
@@ -3253,34 +3674,45 @@ async function runQuery() {
   const yr = enc(years);
   const g = dcfState.g, r = dcfState.r, mos = dcfState.mos;
 
-  // Fire all requests simultaneously
-  const pLatest = fetchJson(`${base}/latest`, token);
-  const pRevenue = fetchJson(`${base}/revenue?years=${yr}`, token);
-  const pPrice = fetchJson(`${base}/price_history?years=${yr}`, token);
-  const pDYield = fetchJson(`${base}/dividend_yield?years=${yr}`, token);
-  const pDivCash = fetchJson(`${base}/dividends_cash?years=${yr}`, token);
-  const pVolume = fetchJson(`${base}/volume_turnover_recent`, token);
-  const pRoeRoa = fetchJson(`${base}/roe_roa?years=${yr}`, token);
-  const pDcf = fetchJson(`${base}/dcf?years=${yr}&growth_rate=${g}&discount_rate=${r}&margin_of_safety=${mos}`, token);
-  const pDebt = fetchJson(`${base}/debt_ratio?years=${yr}`, token);
-  const pFcf = fetchJson(`${base}/free_cash_flow?years=${yr}`, token);
-  const pFcfQuarterly = fetchJson(`${base}/free_cash_flow_quarterly?years=${yr}`, token);
-  const pCapitalFormation = fetchJson(`${base}/capital_formation`, token);
-  const pShareholding = fetchJson(`${base}/shareholding`, token);
-  const pShareholdingSpread = fetchJson(`${base}/shareholding_spread?years=${yr}`, token);
-  const pTurnoverDays = fetchJson(`${base}/turnover_days?years=${yr}`, token);
-  const pPeRiver = fetchJson(`${base}/pe_river?years=${yr}`, token);
+  // The quick tab's requests go first. Browsers allow about six connections per
+  // host, so firing everything at once would queue them behind slow deep-read
+  // endpoints. The rest wait for quick_summary, which has also warmed the caches
+  // they share; the timeout stops a stalled summary from holding them back.
+  const pLatest = fetchJson(`${base}/latest`, token, signal);
+  const pQuick = fetchJson(quickQueryUrl(stockId, years), token, signal);
+  const pBuyScore = fetchJson(`${base}/buy_score`, token, signal);
+  const deepReadGate = Promise.race([
+    pQuick.catch(() => null),
+    new Promise((resolve) => window.setTimeout(resolve, DEEP_READ_MAX_WAIT_MS)),
+  ]);
+  const deepRead = (url) => deepReadGate.then(() => fetchJson(url, token, signal));
+
+  const pRevenue = deepRead(`${base}/revenue?years=${yr}`);
+  const pPrice = deepRead(`${base}/price_history?years=${yr}`);
+  const pDYield = deepRead(`${base}/dividend_yield?years=${yr}`);
+  const pDivCash = deepRead(`${base}/dividends_cash?years=${yr}`);
+  const pVolume = deepRead(`${base}/volume_turnover_recent`);
+  const pRoeRoa = deepRead(`${base}/roe_roa?years=${yr}`);
+  const pDcf = deepRead(`${base}/dcf?years=${yr}&growth_rate=${g}&discount_rate=${r}&margin_of_safety=${mos}`);
+  const pDebt = deepRead(`${base}/debt_ratio?years=${yr}`);
+  const pFcf = deepRead(`${base}/free_cash_flow?years=${yr}`);
+  const pFcfQuarterly = deepRead(`${base}/free_cash_flow_quarterly?years=${yr}`);
+  const pCapitalFormation = deepRead(`${base}/capital_formation`);
+  const pShareholding = deepRead(`${base}/shareholding`);
+  const pShareholdingSpread = deepRead(`${base}/shareholding_spread?years=${yr}`);
+  const pTurnoverDays = deepRead(`${base}/turnover_days?years=${yr}`);
+  const pPeRiver = deepRead(`${base}/pe_river?years=${yr}`);
   // New financial indicator endpoints
-  const pMargins = fetchJson(`${base}/margins?years=${yr}`, token);
-  const pEpsTrend = fetchJson(`${base}/eps_trend?years=${yr}`, token);
-  const pLiquidity = fetchJson(`${base}/liquidity?years=${yr}`, token);
-  const pForeignHolding = fetchJson(`${base}/foreign_holding?years=${yr}`, token);
-  const pValuationExtra = fetchJson(`${base}/valuation_extra?years=${yr}`, token);
-  const pForwardRollingEps = fetchJson(`${base}/forward_rolling_eps?years=${yr}`, token);
-  const pBuyScore = fetchJson(`${base}/buy_score`, token);
+  const pMargins = deepRead(`${base}/margins?years=${yr}`);
+  const pEpsTrend = deepRead(`${base}/eps_trend?years=${yr}`);
+  const pLiquidity = deepRead(`${base}/liquidity?years=${yr}`);
+  const pForeignHolding = deepRead(`${base}/foreign_holding?years=${yr}`);
+  const pValuationExtra = deepRead(`${base}/valuation_extra?years=${yr}`);
+  const pForwardRollingEps = deepRead(`${base}/forward_rolling_eps?years=${yr}`);
+  const pMarginTrading = deepRead(`${base}/margin_trading`);
 
   const allPromises = [
-    pLatest, pRevenue, pPrice, pDYield, pDivCash, pVolume, pRoeRoa, pDcf,
+    pLatest, pQuick, pMarginTrading, pRevenue, pPrice, pDYield, pDivCash, pVolume, pRoeRoa, pDcf,
     pDebt, pFcf, pFcfQuarterly, pCapitalFormation, pShareholding, pShareholdingSpread,
     pTurnoverDays, pPeRiver, pMargins, pEpsTrend, pLiquidity, pForeignHolding,
     pValuationExtra, pForwardRollingEps, pBuyScore,
@@ -3301,9 +3733,32 @@ async function runQuery() {
       // Persist this successful query so the next open restores it instantly.
       saveQueryCache();
     } else {
-      setStatus(`查詢中… ${doneCount}/${allPromises.length}`);
+      setStatus(`${progressWord}… ${doneCount}/${allPromises.length}`);
     }
   }
+
+  pQuick.then((data) => {
+    dashboardState.quickSummary = data;
+    renderQuick();
+    onDone();
+  }).catch((err) => {
+    console.error("quick_summary:", err);
+    if (dashboardState.quickSummary) renderQuick();
+    else showQuickError(err.message);
+    onDone(true);
+  });
+
+  pMarginTrading.then((data) => {
+    dashboardState.marginTradingData = data;
+    renderMarginTrading(data);
+    onDone();
+  }).catch((err) => {
+    console.error("margin_trading:", err);
+    clearSkeleton("marginTrading");
+    const el = $("marginTrading");
+    if (el) el.textContent = "融資融券資料暫不可用";
+    onDone();
+  });
 
   // ── Group 1: fast core data ────────────────────────────────────────────────
   // Render latest price & institutional immediately when ready
@@ -3636,13 +4091,17 @@ async function runQuery() {
 
   pBuyScore.then((data) => {
     dashboardState.buyScoreData = data;
+    dashboardState.quickRiskFailed = false;
     renderBuyScore(data);
+    renderQuick();
     onDone();
   }).catch((err) => {
     console.error("buy_score:", err);
     clearSkeleton("buyScoreSkeleton");
     const el = $("buyScoreSkeleton");
     if (el) el.textContent = "買入評分資料暫不可用：" + err.message;
+    dashboardState.quickRiskFailed = !dashboardState.buyScoreData;
+    renderQuick();
     onDone(true);
   });
 }
@@ -3663,7 +4122,9 @@ window.addEventListener("resize", () => {
 hookDcfRecalc();
 bindTokenSettings();
 bindPaidApiToggle();
+deferChartsToTabs();
 initTabs();
+initQuickAnalysis();
 initTheme();
 initQuickActions();
 initOneHandControls();

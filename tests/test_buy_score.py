@@ -1,6 +1,7 @@
 """Tests for /api/stocks/{stock_id}/buy_score endpoint and sloan_ratio helper."""
 from __future__ import annotations
 
+import threading
 from datetime import date
 
 import pandas as pd
@@ -10,7 +11,7 @@ from fastapi.testclient import TestClient
 import api
 from cache import CacheStore
 from datasource_finmind import FinMindClient
-from series_builder import compute_sloan_ratio
+from series_builder import compute_sloan_ratio, decumulate_ytd, recent_ocf_to_income
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +215,10 @@ def _patch_all_finmind(monkeypatch, *, debt_pct=40.0, fcf_positive=True, roe_val
     monkeypatch.setattr(FinMindClient, "fetch_shareholding_spread",
                         lambda self, *a, **kw: pd.DataFrame(columns=["date", "HoldingSharesLevel", "percent"]))
     monkeypatch.setattr(FinMindClient, "fetch_inventory_and_revenue_growth",
-                        lambda self, *a, **kw: {"inv_yoy": 5.0, "rev_yoy": 10.0})
+                        lambda self, *a, **kw: {"inv_yoy": 5.0, "ar_yoy": 5.0, "rev_yoy": 10.0})
+    monkeypatch.setattr(FinMindClient, "fetch_quarterly_fcf_data",
+                        lambda self, *a, **kw: pd.DataFrame(
+                            columns=["quarter", "quarter_label", "operating_cf", "capex", "fcf"]))
 
     # Patch Goodinfo
     if api.GoodinfoClient is not None:
@@ -422,3 +426,212 @@ class TestBuyScoreDataAccuracy:
         assert inst_c["pass"] is False
         assert inst_c["value"] is not None
         assert inst_c["value"] < 0
+
+
+# ---------------------------------------------------------------------------
+# R1 / R2 / R10 / R11
+# ---------------------------------------------------------------------------
+
+def _ytd_ocf(values: dict[str, float]) -> pd.DataFrame:
+    return pd.DataFrame([
+        {"quarter": q, "quarter_label": q, "operating_cf": v, "capex": 0.0, "fcf": v}
+        for q, v in values.items()
+    ])
+
+
+def _quarterly_ni(value: float = 100.0) -> pd.Series:
+    quarters = pd.to_datetime(["2025-03-31", "2025-06-30", "2025-09-30", "2025-12-31"])
+    return pd.Series([value] * 4, index=quarters, dtype=float)
+
+
+def _risk_names(client, sid: str = "2330") -> list[str]:
+    payload = client.get(f"/api/stocks/{sid}/buy_score?token=test").json()
+    return [r["name"] for r in payload["risk_criteria"]]
+
+
+def _set_industry(monkeypatch, industry: str) -> None:
+    monkeypatch.setattr(FinMindClient, "fetch_stock_industry", lambda self, *a, **kw: industry)
+
+
+class TestReceivablesRisk:
+
+    def _with_yoy(self, monkeypatch, **yoy) -> None:
+        _patch_all_finmind(monkeypatch)
+        monkeypatch.setattr(FinMindClient, "fetch_inventory_and_revenue_growth", lambda self, *a, **kw: yoy)
+
+    def test_receivable_growth_far_above_revenue_triggers(self, test_client, monkeypatch) -> None:
+        self._with_yoy(monkeypatch, inv_yoy=5.0, ar_yoy=60.0, rev_yoy=10.0)
+        assert "應收帳款異常膨脹" in _risk_names(test_client)
+
+    def test_receivable_growth_in_line_with_revenue_does_not_trigger(self, test_client, monkeypatch) -> None:
+        self._with_yoy(monkeypatch, inv_yoy=5.0, ar_yoy=10.0, rev_yoy=10.0)
+        assert "應收帳款異常膨脹" not in _risk_names(test_client)
+
+    def test_fast_receivables_matching_fast_revenue_does_not_trigger(self, test_client, monkeypatch) -> None:
+        self._with_yoy(monkeypatch, inv_yoy=5.0, ar_yoy=60.0, rev_yoy=50.0)
+        assert "應收帳款異常膨脹" not in _risk_names(test_client)
+
+    def test_missing_receivables_neither_triggers_nor_errors(self, test_client, monkeypatch) -> None:
+        self._with_yoy(monkeypatch, inv_yoy=5.0, ar_yoy=None, rev_yoy=10.0)
+        assert "應收帳款異常膨脹" not in _risk_names(test_client)
+
+    def test_missing_inventory_still_checks_receivables(self, test_client, monkeypatch) -> None:
+        self._with_yoy(monkeypatch, inv_yoy=None, ar_yoy=60.0, rev_yoy=10.0)
+        assert _risk_names(test_client) == ["應收帳款異常膨脹"]
+
+    def test_banks_are_exempt(self, test_client, monkeypatch) -> None:
+        self._with_yoy(monkeypatch, inv_yoy=5.0, ar_yoy=60.0, rev_yoy=10.0)
+        _set_industry(monkeypatch, "金融保險業")
+        assert "應收帳款異常膨脹" not in _risk_names(test_client, "2891")
+
+
+class TestOcfDivergenceRisk:
+
+    def _with_ocf(self, monkeypatch, ni: pd.Series, ytd: dict[str, float]) -> None:
+        _patch_all_finmind(monkeypatch)
+        monkeypatch.setattr(FinMindClient, "fetch_quarterly_ni", lambda self, *a, **kw: ni)
+        monkeypatch.setattr(FinMindClient, "fetch_quarterly_fcf_data", lambda self, *a, **kw: _ytd_ocf(ytd))
+
+    def test_two_weak_quarters_trigger(self, test_client, monkeypatch) -> None:
+        # Single-quarter OCF of 50 against net income of 100.
+        self._with_ocf(monkeypatch, _quarterly_ni(), {
+            "2025-03-31": 100.0, "2025-06-30": 200.0, "2025-09-30": 250.0, "2025-12-31": 300.0,
+        })
+        assert "營業現金流與獲利背離" in _risk_names(test_client)
+
+    def test_cumulative_values_are_not_read_as_quarterly(self, test_client, monkeypatch) -> None:
+        """Raw YTD 250/300 would look healthy; the real quarters are 50 each."""
+        self._with_ocf(monkeypatch, _quarterly_ni(), {
+            "2025-03-31": 100.0, "2025-06-30": 200.0, "2025-09-30": 250.0, "2025-12-31": 300.0,
+        })
+        payload = test_client.get("/api/stocks/2330/buy_score?token=test").json()
+        risk = next(r for r in payload["risk_criteria"] if r["name"] == "營業現金流與獲利背離")
+        assert risk["value_label"] == "OCF/淨利 0.50"
+
+    def test_one_weak_quarter_does_not_trigger(self, test_client, monkeypatch) -> None:
+        self._with_ocf(monkeypatch, _quarterly_ni(), {
+            "2025-03-31": 100.0, "2025-06-30": 200.0, "2025-09-30": 300.0, "2025-12-31": 350.0,
+        })
+        assert "營業現金流與獲利背離" not in _risk_names(test_client)
+
+    def test_healthy_cash_flow_does_not_trigger(self, test_client, monkeypatch) -> None:
+        self._with_ocf(monkeypatch, _quarterly_ni(), {
+            "2025-03-31": 100.0, "2025-06-30": 200.0, "2025-09-30": 300.0, "2025-12-31": 400.0,
+        })
+        assert "營業現金流與獲利背離" not in _risk_names(test_client)
+
+    def test_insufficient_quarters_warn_instead_of_trigger(self, test_client, monkeypatch) -> None:
+        self._with_ocf(monkeypatch, _quarterly_ni(), {"2025-12-31": 100.0})
+        payload = test_client.get("/api/stocks/2330/buy_score?token=test").json()
+        assert "營業現金流與獲利背離" not in [r["name"] for r in payload["risk_criteria"]]
+        assert "ocf_ni: 季度資料不足" in payload["warnings"]
+
+    def test_banks_are_exempt(self, test_client, monkeypatch) -> None:
+        self._with_ocf(monkeypatch, _quarterly_ni(), {
+            "2025-03-31": 100.0, "2025-06-30": 200.0, "2025-09-30": 250.0, "2025-12-31": 300.0,
+        })
+        _set_industry(monkeypatch, "金融保險業")
+        assert "營業現金流與獲利背離" not in _risk_names(test_client, "2891")
+
+
+class TestMopsNewsRisk:
+
+    def test_auditor_change_adds_a_governance_risk(self, test_client, monkeypatch) -> None:
+        _patch_all_finmind(monkeypatch)
+        monkeypatch.setattr(api, "fetch_major_news", lambda sid: [
+            {"date": "2026-02-01", "title": "公告本公司更換會計師"},
+        ])
+        payload = test_client.get("/api/stocks/2330/buy_score?token=test").json()
+        risk = next(r for r in payload["risk_criteria"] if r["category"] == "治理")
+        assert risk["name"] == "近一年更換會計師"
+        assert risk["value_label"] == "2026-02-01"
+        assert risk["description"] == "公告本公司更換會計師"
+
+    def test_filing_delay_adds_a_governance_risk(self, test_client, monkeypatch) -> None:
+        _patch_all_finmind(monkeypatch)
+        monkeypatch.setattr(api, "fetch_major_news", lambda sid: [
+            {"date": "2026-02-01", "title": "本公司延後公告財務報告"},
+        ])
+        assert "財報延遲申報" in _risk_names(test_client)
+
+    def test_clean_news_adds_nothing(self, test_client, monkeypatch) -> None:
+        _patch_all_finmind(monkeypatch)
+        monkeypatch.setattr(api, "fetch_major_news", lambda sid: [
+            {"date": "2026-02-01", "title": "公告本公司2026年1月合併營業額"},
+        ])
+        assert _risk_names(test_client) == []
+
+    def test_unreadable_mops_is_reported_not_treated_as_clean(self, test_client, monkeypatch) -> None:
+        from datasource_mops_news import MopsNewsError
+
+        def blocked(sid):
+            raise MopsNewsError("MOPS request failed: ValueError")
+
+        _patch_all_finmind(monkeypatch)
+        monkeypatch.setattr(api, "fetch_major_news", blocked)
+        r = test_client.get("/api/stocks/2330/buy_score?token=test")
+        assert r.status_code == 200
+        payload = r.json()
+        assert payload["risk_criteria"] == []
+        assert "mops_news: MOPS request failed: ValueError" in payload["warnings"]
+
+    def test_slow_mops_does_not_hang_buy_score(self, test_client, monkeypatch) -> None:
+        release = threading.Event()
+        _patch_all_finmind(monkeypatch)
+        monkeypatch.setattr(api, "_MOPS_NEWS_WAIT_SECONDS", 0.05)
+        monkeypatch.setattr(api, "fetch_major_news", lambda sid: release.wait(5) and [])
+        try:
+            payload = test_client.get("/api/stocks/2330/buy_score?token=test").json()
+        finally:
+            release.set()
+        assert "mops_news: timeout" in payload["warnings"]
+
+
+class TestDecumulateYtd:
+
+    def _ytd(self, values: dict[str, float]) -> pd.Series:
+        return pd.Series(list(values.values()), index=pd.to_datetime(list(values)), dtype=float)
+
+    def test_subtracts_the_previous_quarter_within_a_year(self) -> None:
+        single = decumulate_ytd(self._ytd({
+            "2025-03-31": 100.0, "2025-06-30": 250.0, "2025-09-30": 300.0, "2025-12-31": 500.0,
+        }))
+        assert single.tolist() == [100.0, 150.0, 50.0, 200.0]
+
+    def test_q1_restarts_the_year(self) -> None:
+        single = decumulate_ytd(self._ytd({"2025-12-31": 500.0, "2026-03-31": 80.0}))
+        assert single.to_dict() == {pd.Timestamp("2026-03-31"): 80.0}
+
+    def test_gap_in_the_year_drops_the_quarter(self) -> None:
+        single = decumulate_ytd(self._ytd({"2025-03-31": 100.0, "2025-09-30": 300.0}))
+        assert single.index.tolist() == [pd.Timestamp("2025-03-31")]
+
+
+class TestRecentOcfToIncome:
+
+    def test_uses_the_latest_quarters_oldest_first(self) -> None:
+        ni = _quarterly_ni()
+        ocf = pd.Series([10.0, 20.0, 30.0, 40.0], index=ni.index)
+        assert recent_ocf_to_income(ni, ocf) == [0.3, 0.4]
+
+    def test_skips_loss_making_quarters(self) -> None:
+        ni = _quarterly_ni()
+        ni.iloc[-1] = -50.0
+        ocf = pd.Series([10.0, 20.0, 30.0, 40.0], index=ni.index)
+        assert recent_ocf_to_income(ni, ocf) == [0.2, 0.3]
+
+    def test_too_few_quarters_gives_nothing(self) -> None:
+        ni = _quarterly_ni()
+        assert recent_ocf_to_income(ni.iloc[:1], ni.iloc[:1]) == []
+
+
+class TestFinancialsCashFlowRisk:
+
+    def test_negative_fcf_is_a_risk_for_ordinary_companies(self, test_client, monkeypatch) -> None:
+        _patch_all_finmind(monkeypatch, fcf_positive=False)
+        assert "自由現金流轉負" in _risk_names(test_client)
+
+    def test_negative_fcf_is_not_a_risk_for_banks(self, test_client, monkeypatch) -> None:
+        _patch_all_finmind(monkeypatch, fcf_positive=False)
+        _set_industry(monkeypatch, "金融保險")
+        assert "自由現金流轉負" not in _risk_names(test_client, "2891")

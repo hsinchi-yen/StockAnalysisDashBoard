@@ -1,8 +1,54 @@
 # Remote Yocto Deploy — Operating Rules
 
-> Version: 2026-05-28  
+> Version: 2026-11-01  
 > Target: `root@10.1.1.230` — Yocto aarch64 (pico-imx8mm), Docker only (no docker-compose)  
 > Applies to: StockAnalysisDashBoard (FastAPI + uvicorn, ARM64)
+
+---
+
+## Before you deploy: the host is shared
+
+`root@10.1.1.230` also runs twse, macro, memdash (with PostgreSQL), twhold and twstock
+containers, and its root filesystem holds both Docker data and the OS. As of 2026-11-01
+it is 92% full with about 200 MB of memory available.
+
+**Prefer the [incremental update](#incremental-update-recommended).** The full image
+flow below writes ~680 MB of new layers (plus a 700 MB tar) and can fill the disk under
+the other services. Use it only when the base image itself must change, and check
+`df -h /` first. Do not run `docker image prune`: it removes other projects' dangling
+images too. Remove only images you confirmed are this project's orphans.
+
+---
+
+## Incremental update (recommended)
+
+Layers the new code onto the running image via `embedded_deployment/Dockerfile.update`:
+a few MB of disk, the same dependency versions, and the old image stays as `:prev`.
+
+```bash
+# 1. Commit first, then ship exactly that commit
+git archive HEAD:embedded_deployment | ssh root@10.1.1.230 \
+    'rm -rf /root/STOCKANALYSISDASHBOARD/update && mkdir -p /root/STOCKANALYSISDASHBOARD/update \
+     && tar -x -C /root/STOCKANALYSISDASHBOARD/update'
+
+# 2. Keep the running image for rollback, then build on top of it
+ssh root@10.1.1.230 'docker tag stock-dashboard:arm64 stock-dashboard:prev \
+    && cd /root/STOCKANALYSISDASHBOARD/update \
+    && docker build -f Dockerfile.update -t stock-dashboard:arm64 .'
+
+# 3. Swap the container
+ssh root@10.1.1.230 'docker stop stock-dashboard && docker rm stock-dashboard && \
+    docker run -d --name stock-dashboard --restart unless-stopped --network host \
+    stock-dashboard:arm64 python -m uvicorn api:app --host 0.0.0.0 --port 8502'
+```
+
+Add `-e FINMIND_API_KEY=...` to `docker run` to enable the 02:00 precompute. Without it
+the nightly job only cleans the cache. The cache lives in the container, so a deploy
+starts it cold.
+
+Then verify (Step 5). If it fails, use [Rollback](#rollback). The `:prev` tag already
+exists, so skip the tagging step there. After a later successful deploy, the previous
+`:prev` has no tag and can be removed once `docker ps -a` shows nothing using it.
 
 ---
 
@@ -80,9 +126,6 @@ docker run -d \
   stock-dashboard:arm64 \
   python -m uvicorn api:app --host 0.0.0.0 --port 8502
 
-# Prune dangling images from the previous deploy
-docker image prune -f
-
 # Remove the tar after load
 rm -f stock-dashboard-arm64.tar
 ```
@@ -93,7 +136,7 @@ rm -f stock-dashboard-arm64.tar
 
 ```bash
 ssh root@10.1.1.230 "docker inspect --format 'Status: {{.State.Status}}' stock-dashboard"
-ssh root@10.1.1.230 "curl -sf http://localhost:8502/health && echo OK"
+ssh root@10.1.1.230 "curl -sf http://localhost:8502/api/health && echo OK"
 ```
 
 Expected: `Status: running` and `OK`.

@@ -1,0 +1,13 @@
+# Incremental update: new application code on top of the image already running.
+#
+# The Yocto host is shared and its disk is nearly full, so a full rebuild, which
+# adds ~680 MB of new layers, can starve the other services. Layering on the
+# running image adds a few MB, keeps the tested dependency versions (requirements
+# are unpinned, so a fresh pip layer could change them), and leaves the previous
+# image in place for rollback. See remote_deploy.md.
+ARG BASE_IMAGE=stock-dashboard:prev
+FROM ${BASE_IMAGE}
+
+RUN pip install --no-cache-dir "apscheduler>=3.10"
+
+COPY . /app

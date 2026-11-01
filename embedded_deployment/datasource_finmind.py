@@ -2,14 +2,20 @@ from __future__ import annotations
 
 import os
 import random
+import threading
 import time
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 from datetime import date
+from functools import lru_cache
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
 import numpy as np
 import requests
+
+from cache import CacheStore, build_cache_key
 
 
 FINMIND_API = "https://api.finmindtrade.com/api/v4/data"
@@ -24,6 +30,56 @@ _FINMIND_BACKOFF_BASE = float(os.environ.get("FINMIND_BACKOFF_BASE", "3.0"))
 _FINMIND_BACKOFF_MAX = float(os.environ.get("FINMIND_BACKOFF_MAX", "30.0"))
 # HTTP statuses worth retrying (transient throttle / upstream hiccups).
 _FINMIND_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+# Outbound FinMind HTTP requests since process start, reported by /api/health.
+FINMIND_CALL_COUNT = 0
+_call_count_lock = threading.Lock()
+
+
+def _count_finmind_call() -> None:
+    global FINMIND_CALL_COUNT
+    with _call_count_lock:
+        FINMIND_CALL_COUNT += 1
+
+
+_MAX_DAYS_ACROSS_FOUR_QUARTERS = 280
+
+# One page query fires ~20 endpoints in parallel and most need the same few
+# datasets over different ranges, so datasets are cached across requests:
+#  - the first fetch is widened to _DS_MIN_YEARS, which covers later shorter
+#    ranges without another call;
+#  - concurrent requests for one dataset wait for a single fetch (_ds_inflight),
+#    since on a cold query they would otherwise all miss at the same moment.
+_DS_MIN_YEARS = 6
+# Datasets that update during the day expire hourly so 盤後 data isn't hidden until
+# tomorrow; statements and revenue only need refreshing once a day.
+_DS_HOURLY_TTL_SECONDS = 3600.0
+_DS_HOURLY_DATASETS = frozenset({
+    "TaiwanStockPrice",
+    "TaiwanStockPER",
+    "TaiwanStockInstitutionalInvestorsBuySell",
+})
+_ds_inflight: dict[str, Future] = {}
+_ds_inflight_lock = threading.Lock()
+
+# Website session JWTs are rejected on every call. Remembering them saves the
+# failed round trip that would otherwise precede each anonymous fallback.
+_illegal_tokens: set[str] = set()
+
+
+@lru_cache(maxsize=4)
+def _store_at(path: str) -> CacheStore:
+    return CacheStore(base_dir=Path(path))
+
+
+def _ds_store() -> Optional[CacheStore]:
+    if os.environ.get("FINMIND_DS_CACHE", "1") == "0":
+        return None
+    return _store_at(os.environ.get("MICROECO_CACHE_DIR") or str(Path(__file__).parent / ".cache"))
+
+
+def _rows_in_range(rows: list[dict], start: str, end: str) -> list[dict]:
+    return [r for r in rows if "date" not in r or start <= str(r["date"])[:10] <= end]
 
 # FinMind TaiwanStockHoldingSharesPer returns descriptive strings for HoldingSharesLevel.
 # Map them to canonical numeric codes "1"–"15" used throughout this project.
@@ -80,6 +136,7 @@ class FinMindClient:
         last_exc: Exception | None = None
         for attempt in range(1 + retries):
             try:
+                _count_finmind_call()
                 r = self.session.get(FINMIND_API, params=params, timeout=timeout)
             except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
                 last_exc = exc
@@ -115,13 +172,101 @@ class FinMindClient:
         if _cache_key in self._ds_cache:
             return self._ds_cache[_cache_key]
 
+        store = _ds_store()
+        if store is None:
+            data = self._fetch_dataset(dataset, stock_id, start_date, end_date, timeout, _retry)
+        else:
+            data = self._get_shared_dataset(store, dataset, stock_id, start_date, end_date, timeout, _retry)
+
+        self._ds_cache[_cache_key] = data
+        return data
+
+    def _get_shared_dataset(
+        self,
+        store: CacheStore,
+        dataset: str,
+        stock_id: str,
+        start_date: date,
+        end_date: date,
+        timeout: float,
+        retry: int,
+    ) -> list[dict]:
+        """Serve a range from the shared cache, fetching at most once at a time."""
+        start, end = start_date.isoformat(), end_date.isoformat()
+        today = date.today()
+        # Undated key so each dataset keeps one file, replaced as it refreshes.
+        key = build_cache_key("finmind_ds", dataset=dataset, stock_id=stock_id)
+
+        while True:
+            record = store.get(key)
+            if (
+                record
+                and record.get("asof") == today.isoformat()
+                and record["start"] <= start
+                and end <= record["end"]
+                and (
+                    dataset not in _DS_HOURLY_DATASETS
+                    or time.time() - record["ts"] < _DS_HOURLY_TTL_SECONDS
+                )
+            ):
+                return _rows_in_range(record["rows"], start, end)
+
+            with _ds_inflight_lock:
+                flight = _ds_inflight.get(key)
+                leading = flight is None
+                if leading:
+                    flight = Future()
+                    _ds_inflight[key] = flight
+
+            if leading:
+                break
+            # Results are returned to waiters directly, not only via the cache:
+            # empty results are never cached, and each waiter would refetch them.
+            fetched_start, fetched_end, rows = flight.result()
+            if fetched_start <= start and end <= fetched_end:
+                return _rows_in_range(rows, start, end)
+
+        wide_start = min(start_date, date(today.year - _DS_MIN_YEARS, today.month, 1))
+        if record:
+            wide_start = min(wide_start, date.fromisoformat(record["start"]))
+        wide_end = max(end_date, today)
+        try:
+            rows = self._fetch_dataset(dataset, stock_id, wide_start, wide_end, timeout, retry)
+            if rows:
+                # Empty results stay uncached: 盤後 data appears later the same day.
+                store.set(key, {
+                    "ts": time.time(),
+                    "asof": today.isoformat(),
+                    "start": wide_start.isoformat(),
+                    "end": wide_end.isoformat(),
+                    "rows": rows,
+                })
+        except BaseException as exc:
+            flight.set_exception(exc)
+            raise
+        else:
+            flight.set_result((wide_start.isoformat(), wide_end.isoformat(), rows))
+            return _rows_in_range(rows, start, end)
+        finally:
+            with _ds_inflight_lock:
+                _ds_inflight.pop(key, None)
+
+    def _fetch_dataset(
+        self,
+        dataset: str,
+        stock_id: str,
+        start_date: date,
+        end_date: date,
+        timeout: float,
+        _retry: int,
+    ) -> list[dict]:
         params = {
             "dataset": dataset,
             "data_id": stock_id,
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
         }
-        if self.api_key:
+        if self.api_key and self.api_key not in _illegal_tokens:
             params["token"] = self.api_key
 
         r = self._session_get_retry(params, timeout, _retry)
@@ -135,6 +280,8 @@ class FinMindClient:
             except Exception:
                 msg = r.text
             if "illegal" in msg.lower() or "illegal" in r.text.lower():
+                if self.api_key:
+                    _illegal_tokens.add(self.api_key)
                 params_no_tok = {k: v for k, v in params.items() if k != "token"}
                 r = self._session_get_retry(params_no_tok, timeout, _retry)
 
@@ -151,7 +298,6 @@ class FinMindClient:
         if not isinstance(data, list):
             raise FinMindError(f"FinMind API error: unexpected payload: {payload}")
 
-        self._ds_cache[_cache_key] = data
         return data
 
     def fetch_month_revenue(self, stock_id: str, start_date: date, end_date: date, timeout: float = 30.0) -> pd.DataFrame:
@@ -284,6 +430,7 @@ class FinMindClient:
         if self.api_key:
             params["token"] = self.api_key
 
+        _count_finmind_call()
         r = self.session.get(FINMIND_API, params=params, timeout=timeout)
         if r.status_code == 402:
             # quota exceeded; treat as non-fatal for name lookup
@@ -319,6 +466,7 @@ class FinMindClient:
         if self.api_key:
             params["token"] = self.api_key
         try:
+            _count_finmind_call()
             r = self.session.get(FINMIND_API, params=params, timeout=timeout)
         except Exception:
             return None
@@ -549,22 +697,22 @@ class FinMindClient:
                     return ts
             return pd.Series(dtype=float)
 
+        def _yoy(ts):
+            # tail(5) spans four quarters, so its first value is the year-ago quarter.
+            if len(ts) < 5 or ts.tail(5).iloc[0] <= 0:
+                return None
+            return ((ts.iloc[-1] / ts.tail(5).iloc[0]) - 1) * 100
+
         inv_ts = _get_last_quarter_val(bs, ["Inventories", "Inventory", "InventoriesNet"])
+        ar_ts = _get_last_quarter_val(bs, ["AccountsReceivableNet", "AccountsReceivable", "NotesAndAccountsReceivableNet"])
         rev_ts = _get_last_quarter_val(inc, ["OperatingRevenue", "Revenue", "GrossSales", "NetSales"])
-        
-        if len(inv_ts) >= 5 and len(rev_ts) >= 5:
-            inv_latest = inv_ts.iloc[-1]
-            inv_last_yr = inv_ts.tail(5).iloc[0] # Roughly YoY for quarters
-            
-            rev_latest = rev_ts.iloc[-1]
-            rev_last_yr = rev_ts.tail(5).iloc[0]
-            
-            if inv_last_yr > 0 and rev_last_yr > 0:
-                inv_yoy = ((inv_latest / inv_last_yr) - 1) * 100
-                rev_yoy = ((rev_latest / rev_last_yr) - 1) * 100
-                return {"inv_yoy": inv_yoy, "rev_yoy": rev_yoy}
-                
-        return None
+
+        rev_yoy = _yoy(rev_ts)
+        inv_yoy = _yoy(inv_ts)
+        ar_yoy = _yoy(ar_ts)
+        if rev_yoy is None or (inv_yoy is None and ar_yoy is None):
+            return None
+        return {"inv_yoy": inv_yoy, "ar_yoy": ar_yoy, "rev_yoy": rev_yoy}
 
     def fetch_cash_flows_statement(self, stock_id: str, start_date: date, end_date: date, timeout: float = 30.0) -> pd.DataFrame:
         """Fetch quarterly cash flow statement (FinMind dataset: TaiwanStockCashFlowsStatement).
@@ -1153,41 +1301,22 @@ class FinMindClient:
                 "p95": round(float(np.percentile(arr, 95)), 2),
             }
 
-        # ── TTM EPS per quarter ────────────────────────────────────────────────
+        # ── TTM EPS per quarter ─────────────────────────
+        # Sums reported EPS. Deriving it from share capital would assume a NT$10 par
+        # value, which not every listed company has.
         eps_ttm_rows: list[dict] = []
         try:
-            ni_q = self.fetch_quarterly_ni(stock_id, start_date, end_date, timeout)
-            quarter_dates = sorted(
-                dt for dt in ni_q.index if not pd.isna(dt) and dt.month in {3, 6, 9, 12}
-            )
-            for i, dt in enumerate(quarter_dates):
-                if i < 3:
+            df_eps = self.fetch_eps_trend(stock_id, start_date, end_date, timeout)
+            quarters = df_eps.dropna(subset=["eps"]).to_dict("records")
+            for i in range(3, len(quarters)):
+                last4 = quarters[i - 3: i + 1]
+                span = pd.Timestamp(last4[-1]["quarter"]) - pd.Timestamp(last4[0]["quarter"])
+                if span.days > _MAX_DAYS_ACROSS_FOUR_QUARTERS:  # a quarter is missing
                     continue
-                last4 = quarter_dates[i - 3: i + 1]
-                ni_vals = [ni_q.get(d) for d in last4]
-                if any(v is None or pd.isna(v) for v in ni_vals):
-                    continue
-                ttm_ni = sum(float(v) for v in ni_vals)  # type: ignore[arg-type]
-
-                # Get share count from balance sheet to convert to per-share
-                bs = self.fetch_balance_sheet(stock_id, start_date, end_date, timeout)
-                share_data = bs[bs["type"].isin(["IssuedCapital", "OrdinaryShares", "CommonStock", "CapitalStock"])]
-                share_late = share_data[share_data["date"] <= dt]
-                if not share_late.empty:
-                    # IssuedCapital is in NT$千; divide by 10 to get shares (千股/10 = 萬股)
-                    # EPS formula: NI (元) / shares (千股 × 1000 / 1000) = NI / (capital / 1000)
-                    capital_k = float(share_late.iloc[-1]["value"])
-                    # capital_k is NT$千 → number of shares = capital_k * 1000 / 10 = capital_k * 100
-                    shares = capital_k * 1000  # shares in units
-                    eps_ttm = round(ttm_ni / shares, 2) if shares > 0 else None
-                else:
-                    eps_ttm = None
-
-                q_num = (dt.month - 1) // 3 + 1
                 eps_ttm_rows.append({
-                    "quarter": str(dt.date()),
-                    "quarter_label": f"{dt.year} Q{q_num}",
-                    "eps_ttm": eps_ttm,
+                    "quarter": last4[-1]["quarter"],
+                    "quarter_label": last4[-1]["quarter_label"],
+                    "eps_ttm": round(sum(float(q["eps"]) for q in last4), 2),
                 })
         except Exception as exc:
             logging.warning("fetch_pe_river_data: EPS TTM failed: %s", exc)

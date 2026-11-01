@@ -35,6 +35,21 @@ _UA_POOL: list[str] = [
 _GOODINFO_CACHE: dict[str, tuple[float, Any]] = {}
 _CACHE_TTL_30D = 30 * 24 * 3600
 
+# A 403 means Goodinfo is blocking this IP. Retrying delays every page that depends
+# on it and keeps the block alive, so stop asking for a while instead.
+_BLOCK_COOLDOWN_SECONDS = 600.0
+_blocked_until = 0.0
+
+
+def _raise_if_blocked() -> None:
+    if time.time() < _blocked_until:
+        raise GoodinfoError("HTTP 403 (cooling down)")
+
+
+def _note_blocked() -> None:
+    global _blocked_until
+    _blocked_until = time.time() + _BLOCK_COOLDOWN_SECONDS
+
 
 def _gc_get(key: str) -> Any:
     entry = _GOODINFO_CACHE.get(key)
@@ -177,6 +192,7 @@ class GoodinfoClient:
         return cookie_val, excel_days
 
     def _fetch_html(self, stock_id: str, rpt_cat: str, timeout: float = 30.0) -> str:
+        _raise_if_blocked()
         max_retries = 3
         delay = 1.0
         params = {"RPT_CAT": rpt_cat, "STOCK_ID": str(stock_id).strip()}
@@ -192,7 +208,10 @@ class GoodinfoClient:
                 time.sleep(delay + random.uniform(0.0, 0.5))
                 delay *= 2
                 continue
-            if r.status_code in (429, 403):
+            if r.status_code == 403:
+                _note_blocked()
+                raise GoodinfoError("HTTP 403")
+            if r.status_code == 429:
                 last_exc = GoodinfoError(f"HTTP {r.status_code}")
                 time.sleep(delay + random.uniform(0.0, 0.5))
                 delay *= 2
@@ -368,6 +387,7 @@ class GoodinfoClient:
         """Fetch the Goodinfo shareholding page HTML, handling JS cookie challenge."""
         import datetime as _dt
 
+        _raise_if_blocked()
         max_retries = 3
         delay = 1.0
         params = {"STOCK_ID": str(stock_id).strip()}
@@ -383,7 +403,10 @@ class GoodinfoClient:
                 time.sleep(delay + random.uniform(0.0, 0.5))
                 delay *= 2
                 continue
-            if r.status_code in (429, 403):
+            if r.status_code == 403:
+                _note_blocked()
+                raise GoodinfoError("HTTP 403")
+            if r.status_code == 429:
                 last_exc = GoodinfoError(f"HTTP {r.status_code}")
                 time.sleep(delay + random.uniform(0.0, 0.5))
                 delay *= 2

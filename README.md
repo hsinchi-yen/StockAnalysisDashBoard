@@ -134,6 +134,13 @@ pytest -q
 | `FINMIND_API_KEY` | — | FinMind API Key（選填，也可在前端輸入） |
 | `MICROECO_CACHE_DIR` | `./cache` | 快取目錄路徑 |
 | `MICROECO_STATIC_DIR` | `./static` | 靜態檔案目錄 |
+| `MICROECO_CACHE_TTL_DAYS` | `7` | 快取保留天數，由隔夜工作清理 |
+| `MICROECO_CACHE_PERSIST_DIR` | （空） | 快取落盤目錄。`MICROECO_CACHE_DIR` 指向 tmpfs（如 `/dev/shm/stock-cache`）時設定：啟動時還原、每晚同步，減少 eMMC 寫入 |
+| `MICROECO_SCHEDULER` | `1` | 設 `0` 停用 02:00（台北）隔夜工作 |
+| `FINMIND_API_KEY` | （空） | 伺服器端 token。隔夜預算 `buy_score` 需要它；未設定時只做快取清理 |
+| `FINMIND_DS_CACHE` | `1` | 設 `0` 停用 FinMind dataset 跨請求快取（除錯用） |
+
+隔夜工作的狀態可從 `/api/health` 的 `scheduler` 欄位查看：是否執行中、預算是否啟用，以及上次批次的時間與成功數（重啟後清空）。
 | `MICROECO_FINMIND_TIMEOUT` | `30` | FinMind API 逾時秒數（Android launcher 預設 60） |
 
 ---

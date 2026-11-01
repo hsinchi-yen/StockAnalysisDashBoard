@@ -1,22 +1,48 @@
 from __future__ import annotations
 
+import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import requests
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+import datasource_finmind
+import datasource_twse_open as twse_open
+import query_history
+import quick_analysis
+import scheduler
 from cache import CacheStore, build_cache_key
 from datasource_finmind import FinMindClient, FinMindError
 from datasource_moneydj import fetch_capital_formation_finmind, fetch_capital_formation_moneydj
+from datasource_mops_news import detect_auditor_change, detect_filing_delay, fetch_major_news
 from datasource_tdcc import TDCCClient, TDCCError
-from series_builder import add_mas, build_continuous_month_index, compute_sloan_ratio, reindex_to_continuous_months
+from series_builder import (
+    add_mas,
+    build_continuous_month_index,
+    compute_sloan_ratio,
+    decumulate_ytd,
+    recent_ocf_to_income,
+    reindex_to_continuous_months,
+)
+
+# Market data is dated in Taiwan time, and every daily cache key uses date.today().
+# Containers default to UTC, where "today" would roll over at 08:00 Taipei and strand
+# anything computed overnight. A POSIX zone string needs no tz database.
+if hasattr(time, "tzset"):
+    os.environ.setdefault("TZ", "CST-8")
+    time.tzset()
 
 try:
     from datasource_mops import fetch_director_shareholding_mops
@@ -41,10 +67,57 @@ APP_DIR = Path(__file__).parent
 STATIC_DIR = Path(os.environ.get("MICROECO_STATIC_DIR", APP_DIR / "static")).expanduser().resolve()
 CACHE_DIR = Path(os.environ.get("MICROECO_CACHE_DIR", APP_DIR / ".cache")).expanduser().resolve()
 
-app = FastAPI(title="MicroEconomicDashBoard API", version="1.0.0")
+cache = CacheStore(base_dir=CACHE_DIR)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    persist_dir = os.environ.get("MICROECO_CACHE_PERSIST_DIR", "").strip()
+    if persist_dir:
+        cache.restore_from(Path(persist_dir))
+    scheduler.start()
+    yield
+    scheduler.stop()
+
+
+app = FastAPI(title="MicroEconomicDashBoard API", version="1.0.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-cache = CacheStore(base_dir=CACHE_DIR)
+_perf_log = logging.getLogger("uvicorn.error")
+# Per-request dict rather than a plain flag: endpoints run in a worker thread with
+# a copied context, so only mutations of a shared object reach the middleware.
+_request_perf: ContextVar[dict[str, Any] | None] = ContextVar("request_perf", default=None)
+
+
+def _mark_cache_hit() -> None:
+    perf = _request_perf.get()
+    if perf is not None:
+        perf["cache_hit"] = True
+
+
+@app.middleware("http")
+async def response_headers_middleware(request: Request, call_next):
+    perf: dict[str, Any] = {}
+    _request_perf.set(perf)
+    started = time.perf_counter()
+    response = await call_next(request)
+    path = request.url.path
+    if path.startswith("/api/"):
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        response.headers["X-Elapsed-Ms"] = f"{elapsed_ms:.1f}"
+        _perf_log.info(
+            "perf path=%s elapsed_ms=%.1f cache_hit=%s",
+            path, elapsed_ms, perf.get("cache_hit", False),
+        )
+    elif path == "/":
+        # index.html carries the ?v= cache-busters, so it must always revalidate.
+        response.headers["Cache-Control"] = "no-cache"
+    elif path.startswith("/static/") and request.query_params.get("v"):
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return response
+
+
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 
 def _compute_month_range(years: int) -> tuple[pd.Timestamp, pd.Timestamp, date]:
@@ -282,7 +355,12 @@ def health() -> dict[str, Any]:
         "ok": True,
         "ts": datetime.now(timezone.utc).isoformat(),
         "goodinfo_available": GOODINFO_IMPORT_ERROR is None,
+        "finmind_calls_since_start": datasource_finmind.FINMIND_CALL_COUNT,
+        "scheduler": scheduler.status(),
     }
+
+
+_LATEST_PRICE_TTL_SECONDS = 3600.0
 
 
 @app.get("/api/stocks/{stock_id}/latest")
@@ -315,16 +393,27 @@ def latest(
     price_cache_key = build_cache_key("api_latest_price", stock_id=sid, asof=today.isoformat())
     cached_price = cache.get(price_cache_key)
 
-    if cached_price and isinstance(cached_price.get("row"), dict):
+    if (
+        cached_price
+        and isinstance(cached_price.get("row"), dict)
+        and time.time() - float(cached_price.get("ts", 0)) < _LATEST_PRICE_TTL_SECONDS
+    ):
         price_row = cached_price["row"]
+        price_source = cached_price.get("source", "finmind")
+        _mark_cache_hit()
     else:
-        try:
-            client = FinMindClient(api_key=token_resolved)
-            start_ts = pd.Timestamp(today.year, today.month, 1) - pd.DateOffset(months=2)
-            start_date = date(int(start_ts.year), int(start_ts.month), 1)
-            df_price = client.fetch_stock_price(stock_id=sid, start_date=start_date, end_date=today)
-        except FinMindError as e:
-            raise HTTPException(status_code=502, detail=str(e))
+        # TWSE covers listed stocks without using FinMind quota; 上櫃 falls through.
+        df_price = twse_open.fetch_stock_day_all(sid)
+        price_source = "twse"
+        if df_price.empty:
+            price_source = "finmind"
+            try:
+                client = FinMindClient(api_key=token_resolved)
+                start_ts = pd.Timestamp(today.year, today.month, 1) - pd.DateOffset(months=2)
+                start_date = date(int(start_ts.year), int(start_ts.month), 1)
+                df_price = client.fetch_stock_price(stock_id=sid, start_date=start_date, end_date=today)
+            except FinMindError as e:
+                raise HTTPException(status_code=502, detail=str(e))
 
         if df_price.empty:
             raise HTTPException(status_code=404, detail="no price data")
@@ -341,7 +430,7 @@ def latest(
             "money": None if pd.isna(last.get("Trading_money")) else int(float(last.get("Trading_money"))),
             "turnover": None if pd.isna(last.get("Trading_turnover")) else int(float(last.get("Trading_turnover"))),
         }
-        cache.set(price_cache_key, {"ts": time.time(), "row": price_row})
+        cache.set(price_cache_key, {"ts": time.time(), "row": price_row, "source": price_source})
 
     latest_date = price_row.get("date")
     if not latest_date:
@@ -363,16 +452,26 @@ def latest(
         inst_as_of = cached_inst.get("as_of")
         inst_status = cached_inst.get("status")
         inst_lag_days = int(cached_inst.get("lag_days") or 0)
+        inst_source = cached_inst.get("source", "finmind")
     else:
+        end_d = date.fromisoformat(latest_date)
+        start_d = end_d - timedelta(days=10)
+        inst_source = "finmind"
+        finmind_error: FinMindError | None = None
         try:
             client = FinMindClient(api_key=token_resolved)
-            end_d = date.fromisoformat(latest_date)
-            start_d = end_d - timedelta(days=10)
             df_inst = client.fetch_institutional_investors_buy_sell(
                 stock_id=sid, start_date=start_d, end_date=end_d
             )
         except FinMindError as e:
-            raise HTTPException(status_code=502, detail=str(e))
+            finmind_error = e
+            df_inst = pd.DataFrame()
+
+        if df_inst.empty:
+            df_inst = twse_open.fetch_institutional_t86(sid)
+            inst_source = "twse"
+            if df_inst.empty and finmind_error is not None:
+                raise HTTPException(status_code=502, detail=str(finmind_error))
 
         name_map = {
             "Foreign_Investor": "外資",
@@ -403,7 +502,7 @@ def latest(
                         "net": int(r.get("net", 0) or 0),
                     }
                 )
-            if most_recent == end_d:
+            if most_recent >= end_d:
                 inst_status = "fresh"
                 inst_lag_days = 0
             else:
@@ -424,14 +523,22 @@ def latest(
                     "as_of": inst_as_of,
                     "status": inst_status,
                     "lag_days": inst_lag_days,
+                    "source": inst_source,
                 },
             )
+
+    try:
+        query_history.record(CACHE_DIR, sid)
+    except OSError as exc:  # history only feeds the nightly batch, never fail a query for it
+        _perf_log.warning("query_history: %s", exc)
 
     return {
         "stock_id": sid,
         "stock_name": stock_name,
         "price": price_row,
+        "price_source": price_source,
         "institutional": inst_rows,
+        "institutional_source": inst_source,
         "institutional_as_of": inst_as_of,
         "institutional_status": inst_status,
         "institutional_lag_days": inst_lag_days,
@@ -970,6 +1077,7 @@ def dcf_valuation(
     )
     cached = cache.get(cache_key)
     if cached and "fair_value" in cached:
+        _mark_cache_hit()
         return {k: v for k, v in cached.items() if k != "ts"}
 
     start_date = date(start.year, start.month, 1)
@@ -1676,7 +1784,7 @@ def pe_river(
     start_ext_date = date(int(start_ext.year), int(start_ext.month), 1)
 
     cache_key = build_cache_key(
-        "api_pe_river_v1",
+        "api_pe_river_v2",
         stock_id=sid,
         start=f"{start:%Y-%m}",
         years=str(years),
@@ -1684,6 +1792,7 @@ def pe_river(
     )
     cached = cache.get(cache_key)
     if cached and isinstance(cached.get("per_rows"), list):
+        _mark_cache_hit()
         return {
             "stock_id": sid,
             "start_month": f"{start:%Y-%m}",
@@ -1964,6 +2073,7 @@ def valuation_extra(
     cache_key = build_cache_key("api_valuation_extra_v3", stock_id=sid, years=str(years), asof=today.isoformat())
     cached = cache.get(cache_key)
     if cached and "graham_number" in cached:
+        _mark_cache_hit()
         return {"stock_id": sid, **{k: v for k, v in cached.items() if k not in ("ts",)}}
 
     try:
@@ -2082,6 +2192,7 @@ def forward_rolling_eps(
     )
     cached = cache.get(cache_key)
     if cached and "forward_eps_m2" in cached:
+        _mark_cache_hit()
         return {"stock_id": sid, **{k: v for k, v in cached.items() if k != "ts"}}
 
     try:
@@ -2347,6 +2458,11 @@ INDUSTRY_EXCLUSIONS: dict[str, list[str]] = {
 }
 
 
+# Receivables and cash flow don't describe a bank's or insurer's earnings quality:
+# loans and policy flows dominate both, so those risks would only produce noise.
+_NON_CASH_QUALITY_INDUSTRIES = ("金融", "銀行", "保險", "證券")
+
+
 def _get_industry_exclusions(industry: str | None) -> set[str]:
     if not industry:
         return set()
@@ -2387,6 +2503,9 @@ def _criterion(
     return result
 
 
+_MOPS_NEWS_WAIT_SECONDS = 15.0
+
+
 @app.get("/api/stocks/{stock_id}/buy_score")
 def buy_score(
     stock_id: str,
@@ -2414,14 +2533,21 @@ def buy_score(
     token_resolved = _require_token(token, x_finmind_token)
     today = date.today()
 
-    cache_key = build_cache_key("api_buy_score_v5", stock_id=sid, asof=today.isoformat())
+    cache_key = build_cache_key("api_buy_score_v7", stock_id=sid, asof=today.isoformat())
     cached = cache.get(cache_key)
     if cached and isinstance(cached.get("criteria"), list):
+        _mark_cache_hit()
         return {k: v for k, v in cached.items() if k != "ts"}
 
     client = FinMindClient(api_key=token_resolved)
     warnings: list[str] = []
     criteria: list[dict[str, Any]] = []
+
+    # MOPS is a separate site, so it runs alongside the FinMind calls below rather
+    # than adding its latency after them.
+    news_pool = ThreadPoolExecutor(max_workers=1)
+    news_future = news_pool.submit(fetch_major_news, sid)
+    news_pool.shutdown(wait=False)
 
     # ── Industry classification (for not_applicable exclusions) ──────────────
     industry: str | None = None
@@ -3013,12 +3139,52 @@ def buy_score(
         except Exception:
             pass
 
+    cash_quality_applies = not any(kw in (industry or "") for kw in _NON_CASH_QUALITY_INDUSTRIES)
+
+    # R1: 應收帳款異常膨脹 — 應收成長率大於營收成長率 20% 以上
+    if inv_data is not None and cash_quality_applies:
+        try:
+            ar_y = inv_data.get("ar_yoy")
+            rev_y = inv_data.get("rev_yoy", 0)
+            if ar_y is not None and ar_y > 20 and (ar_y - rev_y > 20):
+                risk_criteria.append({
+                    "category": "財務造假",
+                    "name": "應收帳款異常膨脹",
+                    "status": "warning",
+                    "value_label": f"應收 YoY {ar_y:.1f}%",
+                    "description": f"應收成長遠大於營收({rev_y:.1f}%)，留意虛增營收或收款惡化"
+                })
+        except Exception:
+            pass
+
+    # R2: 營業現金流與獲利背離 — 連續 2 季 OCF/淨利 < 0.7
+    if cash_quality_applies:
+        try:
+            # Same cash-flow dataset as fetch_annual_fcf_data, so this costs no extra call.
+            df_ocf = client.fetch_quarterly_fcf_data(sid, fetch_start_ext, today)
+            ocf_ytd = pd.Series(
+                df_ocf["operating_cf"].values, index=pd.to_datetime(df_ocf["quarter"]), dtype=float
+            )
+            ratios = recent_ocf_to_income(ni_q, decumulate_ytd(ocf_ytd))
+            if not ratios:
+                warnings.append("ocf_ni: 季度資料不足")
+            elif all(ratio < 0.7 for ratio in ratios):
+                risk_criteria.append({
+                    "category": "財務造假",
+                    "name": "營業現金流與獲利背離",
+                    "status": "warning",
+                    "value_label": f"OCF/淨利 {ratios[-1]:.2f}",
+                    "description": "連續 2 季營業現金流遠低於淨利，獲利含金量不足"
+                })
+        except Exception as exc:
+            warnings.append(f"ocf_ni: {exc}")
+
     # [NEW] 存貨異常排雷：存貨成長率大於營收成長率 20% 以上
     if inv_data is not None:
         try:
-            inv_y = inv_data.get("inv_yoy", 0)
+            inv_y = inv_data.get("inv_yoy")
             rev_y = inv_data.get("rev_yoy", 0)
-            if inv_y > 20 and (inv_y - rev_y > 20):
+            if inv_y is not None and inv_y > 20 and (inv_y - rev_y > 20):
                 risk_criteria.append({
                     "category": "存貨排雷",
                     "name": "存貨飆升去化慢",
@@ -3030,7 +3196,7 @@ def buy_score(
             pass
 
     # 1. 現金流與淨利背離 (OCF/NI)
-    if c2b_value is not None and c2b_value < 0:
+    if c2b_value is not None and c2b_value < 0 and cash_quality_applies:
         risk_criteria.append({
             "category": "獲利排雷",
             "name": "自由現金流轉負",
@@ -3218,6 +3384,26 @@ def buy_score(
         except Exception:
             pass
 
+    # R10 / R11: 重大訊息 — 更換會計師、財報延遲申報。讀不到時標示 warning，不當成沒有雷。
+    try:
+        news = news_future.result(timeout=_MOPS_NEWS_WAIT_SECONDS)
+        for hits, name in (
+            (detect_auditor_change(news), "近一年更換會計師"),
+            (detect_filing_delay(news), "財報延遲申報"),
+        ):
+            if hits:
+                risk_criteria.append({
+                    "category": "治理",
+                    "name": name,
+                    "status": "warning",
+                    "value_label": hits[0]["date"],
+                    "description": hits[0]["title"],
+                })
+    except FutureTimeoutError:
+        warnings.append("mops_news: timeout")
+    except Exception as exc:
+        warnings.append(f"mops_news: {exc}")
+
     risk_score = len(risk_criteria)
     if risk_score >= 2:
         recommendation, recommendation_label = "not_recommended", "高風險避開"
@@ -3249,3 +3435,89 @@ def buy_score(
         cache.set(cache_key, {"ts": time.time(), **payload})
     return payload
 
+
+@app.get("/api/stocks/{stock_id}/margin_trading")
+def margin_trading(stock_id: str) -> dict[str, Any]:
+    """最新融資融券餘額（TWSE 全市場快照，免 token；上櫃股回 available=False）。"""
+    sid = stock_id.strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="stock_id is required")
+
+    df = twse_open.fetch_margin_margn(sid)
+    if df.empty:
+        return {"stock_id": sid, "available": False}
+
+    row = df.iloc[-1]
+
+    def value(column: str) -> float | None:
+        return None if pd.isna(row[column]) else float(row[column])
+
+    return {
+        "stock_id": sid,
+        "available": True,
+        "date": row["date"],
+        "margin_balance": value("margin_balance"),
+        "short_balance": value("short_balance"),
+        "short_margin_ratio": value("short_margin_ratio"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# === Quick Analysis (快速分析) ===
+# ---------------------------------------------------------------------------
+
+@app.get("/api/stocks/{stock_id}/quick_summary")
+def quick_summary(
+    stock_id: str,
+    years: int = Query(default=5, ge=1, le=10),
+    growth_rate: float = Query(default=0.04, ge=0.0, le=0.2),
+    discount_rate: float = Query(default=0.08, ge=0.01, le=0.3),
+    margin_of_safety: float = Query(default=0.30, ge=0.0, le=0.8),
+    token: str | None = Query(default=None),
+    x_finmind_token: str | None = Header(default=None, alias="X-FinMind-Token"),
+) -> dict[str, Any]:
+    """安全邊際估值 vs 成長期估值的價格階梯。
+
+    Aggregates the valuation endpoints in-process, so a component failure only
+    drops that component. buy_score is deliberately left out: it is the slowest
+    endpoint and the page overlays its risk result when it arrives.
+    """
+    sid = stock_id.strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="stock_id is required")
+
+    token_resolved = _require_token(token, x_finmind_token)
+
+    # Calling endpoint functions directly bypasses FastAPI, so every parameter
+    # must be passed: an omitted one would arrive as a Query()/Header() object.
+    auth = {"token": token_resolved, "x_finmind_token": None}
+    parts = {
+        "latest": lambda: latest(sid, **auth),
+        "dcf": lambda: dcf_valuation(
+            sid, years=years, growth_rate=growth_rate, discount_rate=discount_rate,
+            margin_of_safety=margin_of_safety, **auth,
+        ),
+        "valuation_extra": lambda: valuation_extra(sid, years=years, **auth),
+        "forward_rolling_eps": lambda: forward_rolling_eps(sid, years=years, **auth),
+        "pe_river": lambda: pe_river(sid, years=years, **auth),
+    }
+
+    warnings: list[str] = []
+    results: dict[str, Any] = {}
+    with ThreadPoolExecutor(max_workers=len(parts)) as pool:
+        futures = {name: pool.submit(call) for name, call in parts.items()}
+    for name, future in futures.items():
+        try:
+            results[name] = future.result()
+        except HTTPException as exc:
+            warnings.append(f"{name}: {exc.detail}")
+        except Exception as exc:
+            # Class name only: requests exceptions embed the URL, including the token.
+            warnings.append(f"{name}: {type(exc).__name__}")
+
+    summary = quick_analysis.compute_summary(
+        results.get("latest"), results.get("dcf"), results.get("valuation_extra"),
+        results.get("forward_rolling_eps"), results.get("pe_river"),
+    )
+    stock_name = (results.get("latest") or {}).get("stock_name")
+    return {"stock_id": sid, "stock_name": stock_name, **summary, "warnings": warnings}

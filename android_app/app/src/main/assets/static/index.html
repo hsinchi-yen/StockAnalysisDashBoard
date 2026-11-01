@@ -4,8 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>台股分析儀表板（FinMind）</title>
-    <link rel="stylesheet" href="/static/styles.css?v=32" />
-    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+    <link rel="stylesheet" href="/static/styles.css?v=33" />
+    <script defer src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
   </head>
   <body>
     <!-- 頂部進度條 -->
@@ -68,6 +68,43 @@
         <p class="chart-note" style="margin-top:8px;">首次使用請輸入並儲存 FinMind API Key（保存在 localStorage）。</p>
         <p id="status" class="status"></p>
 
+        <div id="trendSummary" class="summary-grid" style="margin-top:12px;"></div>
+      </section>
+
+      <!-- ── Tab 導航列 ── -->
+      <nav class="tab-nav" id="tabNav">
+        <button class="tab-btn active" data-tab="tab-quick">快速分析</button>
+        <button class="tab-btn" data-tab="tab-basic">基本資訊</button>
+        <button class="tab-btn" data-tab="tab-revenue">營收分析</button>
+        <button class="tab-btn" data-tab="tab-profit">獲利能力</button>
+        <button class="tab-btn" data-tab="tab-health">財務健康</button>
+        <button class="tab-btn" data-tab="tab-valuation">估值</button>
+        <button class="tab-btn" data-tab="tab-buyscore">買入評分</button>
+      </nav>
+
+      <!-- ══════════════════════════════════════
+           Tab 0: 快速分析
+      ══════════════════════════════════════ -->
+      <div id="tab-quick" class="tab-panel active">
+
+        <section class="card quick-verdict-card">
+          <div id="quickVerdict">
+            <p class="chart-note" style="margin:0;">輸入股票代號並按「查詢」，這裡會顯示風險與潛在獲利的快速判定。</p>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>風險 vs. 潛在獲利</h2>
+          <p class="chart-note">左端是保守的安全邊際估值，右端是樂觀的成長期估值，圓點是現價；紅段為回落到安全邊際的距離，綠段為上漲到成長估值的距離。</p>
+          <div id="quickLadder"></div>
+        </section>
+
+        <section class="card">
+          <h2>風險／上檔象限</h2>
+          <p class="chart-note">橫軸為風險分數（排雷警示 × 2 + 未通過指標 ÷ 4），縱軸為到成長期估值的上檔空間。</p>
+          <div id="quickQuadrant" class="chart"></div>
+        </section>
+
         <!-- 投資策略燈號 -->
         <div id="signalCard" class="signal-card" style="display:none;">
           <div class="signal-title">投資策略燈號</div>
@@ -90,23 +127,12 @@
           </div>
         </div>
 
-        <div id="trendSummary" class="summary-grid" style="margin-top:12px;"></div>
-      </section>
-
-      <!-- ── Tab 導航列 ── -->
-      <nav class="tab-nav" id="tabNav">
-        <button class="tab-btn active" data-tab="tab-basic">基本資訊</button>
-        <button class="tab-btn" data-tab="tab-revenue">營收分析</button>
-        <button class="tab-btn" data-tab="tab-profit">獲利能力</button>
-        <button class="tab-btn" data-tab="tab-health">財務健康</button>
-        <button class="tab-btn" data-tab="tab-valuation">估值</button>
-        <button class="tab-btn" data-tab="tab-buyscore">買入評分</button>
-      </nav>
+      </div>
 
       <!-- ══════════════════════════════════════
            Tab 1: 基本資訊
       ══════════════════════════════════════ -->
-      <div id="tab-basic" class="tab-panel active">
+      <div id="tab-basic" class="tab-panel">
 
         <!-- 排雷警示橫幅（buy_score 資料載入後更新） -->
         <div id="riskBadgeSummary" class="risk-badge-summary" style="display:none;">
@@ -125,6 +151,13 @@
             <p id="institutionalNote" class="chart-note" style="display:none;"></p>
             <div id="institutional" class="skeleton-section" style="min-height:80px;"></div>
           </section>
+        </section>
+
+        <!-- 融資融券 -->
+        <section class="card">
+          <h2>融資融券</h2>
+          <p id="marginTradingNote" class="chart-note" style="display:none;"></p>
+          <div id="marginTrading" class="metrics skeleton-section" style="min-height:80px;"></div>
         </section>
 
         <!-- 外資持股比例 -->
@@ -410,7 +443,11 @@
 
       <!-- 行動版底部 Tab 列 -->
       <nav class="bottom-nav" id="bottomNav">
-        <button class="bottom-nav-btn active" data-tab="tab-basic">
+        <button class="bottom-nav-btn active" data-tab="tab-quick">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+          <span>快速</span>
+        </button>
+        <button class="bottom-nav-btn" data-tab="tab-basic">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>
           <span>基本</span>
         </button>
@@ -441,6 +478,6 @@
       </footer>
     </main>
 
-    <script src="/static/app.js?v=32"></script>
+    <script defer src="/static/app.js?v=33"></script>
   </body>
 </html>

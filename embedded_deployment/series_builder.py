@@ -66,3 +66,35 @@ def compute_sloan_ratio(
     if avg_total_assets == 0:
         return None
     return (net_income_annual - operating_cf_annual) / avg_total_assets
+
+
+def decumulate_ytd(ytd: pd.Series) -> pd.Series:
+    """Turn a year-to-date quarterly series into single-quarter values.
+
+    Taiwan cash-flow statements report the fiscal year's running total. A quarter
+    whose predecessor in the same year is missing is dropped: subtracting across
+    the gap would attribute two quarters of cash flow to one.
+    """
+    ordered = ytd.dropna().sort_index()
+    single: dict[pd.Timestamp, float] = {}
+    for quarter_end, value in ordered.items():
+        if quarter_end.month == 3:
+            single[quarter_end] = float(value)
+            continue
+        previous = quarter_end - pd.offsets.QuarterEnd(1)
+        if previous in ordered.index:
+            single[quarter_end] = float(value) - float(ordered.loc[previous])
+    return pd.Series(single, dtype=float).sort_index()
+
+
+def recent_ocf_to_income(net_income: pd.Series, operating_cf: pd.Series, quarters: int = 2) -> list[float]:
+    """OCF / net income for the latest profitable quarters, oldest first.
+
+    Loss-making quarters are skipped because the ratio has no meaning there.
+    Returns [] when fewer than `quarters` usable quarters exist.
+    """
+    common = net_income.dropna().index.intersection(operating_cf.dropna().index).sort_values()
+    profitable = [q for q in common if float(net_income.loc[q]) > 0]
+    if len(profitable) < quarters:
+        return []
+    return [float(operating_cf.loc[q]) / float(net_income.loc[q]) for q in profitable[-quarters:]]

@@ -1,0 +1,18 @@
+[
+  {"name": "risk_high_beats_cheap_price", "price": 80, "floor": 100, "ceiling": 150, "position": 0.0, "risk_level": "high", "risk_count": 3, "verdict": "avoid", "text": "偵測到 3 項排雷警示，先避開"},
+  {"name": "below_floor_low_risk", "price": 80, "floor": 100, "ceiling": 150, "position": 0.0, "risk_level": "low", "risk_count": 0, "verdict": "buy", "text": "現價低於安全邊際估值，具下檔保護"},
+  {"name": "below_floor_medium_risk", "price": 80, "floor": 100, "ceiling": 150, "position": 0.0, "risk_level": "medium", "risk_count": 1, "verdict": "buy", "text": "現價低於安全邊際估值，具下檔保護"},
+  {"name": "lower_half_low_risk", "price": 110, "floor": 100, "ceiling": 150, "position": 0.2, "risk_level": "low", "risk_count": 0, "verdict": "accumulate", "text": "現價位於區間下半，可分批佈局"},
+  {"name": "lower_half_medium_risk", "price": 110, "floor": 100, "ceiling": 150, "position": 0.2, "risk_level": "medium", "risk_count": 1, "verdict": "watch", "text": "估值合理但有 1 項警示，列入觀察"},
+  {"name": "lower_half_risk_unknown", "price": 110, "floor": 100, "ceiling": 150, "position": 0.2, "risk_level": null, "risk_count": 0, "verdict": "watch", "text": "估值合理，排雷資料不足，列入觀察"},
+  {"name": "upper_half", "price": 140, "floor": 100, "ceiling": 150, "position": 0.8, "risk_level": "low", "risk_count": 0, "verdict": "hold", "text": "現價偏向成長估值，上檔有限"},
+  {"name": "exactly_midpoint", "price": 125, "floor": 100, "ceiling": 150, "position": 0.5, "risk_level": "low", "risk_count": 0, "verdict": "hold", "text": "現價偏向成長估值，上檔有限"},
+  {"name": "above_ceiling", "price": 170, "floor": 100, "ceiling": 150, "position": 1.0, "risk_level": "low", "risk_count": 0, "verdict": "wait", "text": "現價高於成長估值，等待回檔"},
+  {"name": "missing_floor", "price": 170, "floor": null, "ceiling": 150, "position": null, "risk_level": "low", "risk_count": 0, "verdict": "insufficient", "text": "估值資料不足"},
+  {"name": "missing_ceiling", "price": 170, "floor": 100, "ceiling": null, "position": null, "risk_level": "medium", "risk_count": 1, "verdict": "insufficient", "text": "估值資料不足"},
+  {"name": "missing_price", "price": null, "floor": 100, "ceiling": 150, "position": null, "risk_level": "low", "risk_count": 0, "verdict": "insufficient", "text": "估值資料不足"},
+  {"name": "high_risk_without_valuation", "price": null, "floor": null, "ceiling": null, "position": null, "risk_level": "high", "risk_count": 2, "verdict": "avoid", "text": "偵測到 2 項排雷警示，先避開"},
+  {"name": "inverted_below_both", "price": 80, "floor": 150, "ceiling": 100, "position": null, "risk_level": "low", "risk_count": 0, "verdict": "buy", "text": "現價低於安全邊際估值，具下檔保護"},
+  {"name": "inverted_above_both", "price": 170, "floor": 150, "ceiling": 100, "position": null, "risk_level": "low", "risk_count": 0, "verdict": "wait", "text": "現價高於成長估值，等待回檔"},
+  {"name": "inverted_between", "price": 120, "floor": 150, "ceiling": 100, "position": null, "risk_level": "low", "risk_count": 0, "verdict": "hold", "text": "估值模型分歧，現價落在兩者之間"}
+]
