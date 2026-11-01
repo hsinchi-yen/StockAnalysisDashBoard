@@ -31,15 +31,20 @@ git archive HEAD:embedded_deployment | ssh root@10.1.1.230 \
     'rm -rf /root/STOCKANALYSISDASHBOARD/update && mkdir -p /root/STOCKANALYSISDASHBOARD/update \
      && tar -x -C /root/STOCKANALYSISDASHBOARD/update'
 
-# 2. Keep the running image for rollback, then build on top of it
+# 2. Keep the running image for rollback, then build on top of it.
+#    --network host: this kernel has no NAT, so pip can't reach PyPI from a bridge network.
 ssh root@10.1.1.230 'docker tag stock-dashboard:arm64 stock-dashboard:prev \
     && cd /root/STOCKANALYSISDASHBOARD/update \
-    && docker build -f Dockerfile.update -t stock-dashboard:arm64 .'
+    && docker build --network host -f Dockerfile.update -t stock-dashboard:new .'
 
-# 3. Swap the container
-ssh root@10.1.1.230 'docker stop stock-dashboard && docker rm stock-dashboard && \
+# 3. Swap the container (about 10 seconds of downtime)
+ssh root@10.1.1.230 'docker tag stock-dashboard:new stock-dashboard:arm64 \
+    && docker stop stock-dashboard && docker rm stock-dashboard && \
     docker run -d --name stock-dashboard --restart unless-stopped --network host \
     stock-dashboard:arm64 python -m uvicorn api:app --host 0.0.0.0 --port 8502'
+
+# 4. After verifying, remove the build leftovers
+ssh root@10.1.1.230 'rm -rf /root/STOCKANALYSISDASHBOARD/update; docker rmi stock-dashboard:new'
 ```
 
 Add `-e FINMIND_API_KEY=...` to `docker run` to enable the 02:00 precompute. Without it
